@@ -278,7 +278,7 @@ if page == "Leads / Capture":
                 created_by="web_user"
             )
             st.success(f"Lead created (ID: {lead.id})")
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("---")
     st.subheader("Recent Leads")
@@ -346,7 +346,7 @@ elif page == "Pipeline Board":
                         if st.button("Change Stage", key=f"btn_change_{lead.id}"):
                             change_stage(session, lead.id, new_stage, changed_by="ui_user")
                             st.success(f"Lead #{lead.id} moved to {new_stage}")
-                            st.experimental_rerun()
+                            st.rerun()
 
                         # Create Estimate
                         st.markdown("---")
@@ -371,7 +371,7 @@ elif page == "Pipeline Board":
                             if st.form_submit_button("Create Estimate", key=f"est_submit_{lead.id}"):
                                 create_estimate(session, lead.id, float(amt), details=details)
                                 st.success("Estimate created")
-                                st.experimental_rerun()
+                                st.rerun()
 
                         # Buttons to mark estimate actions (choose first estimate for demo)
                         if ests:
@@ -381,17 +381,17 @@ elif page == "Pipeline Board":
                                 if st.button("Mark Sent", key=f"send_{first_est.id}"):
                                     mark_estimate_sent(session, first_est.id)
                                     st.success("Marked as sent")
-                                    st.experimental_rerun()
+                                    st.rerun()
                             with col_b:
                                 if st.button("Mark Approved", key=f"app_{first_est.id}"):
                                     mark_estimate_approved(session, first_est.id)
                                     st.success("Estimate approved and lead marked Awarded")
-                                    st.experimental_rerun()
+                                    st.rerun()
                             with col_c:
                                 if st.button("Mark Lost", key=f"lost_{first_est.id}"):
                                     mark_estimate_lost(session, first_est.id, reason="Lost to competitor")
                                     st.success("Estimate marked lost and lead moved to Lost")
-                                    st.experimental_rerun()
+                                    st.rerun()
 
 
 # ---------------------------
