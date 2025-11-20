@@ -1,17 +1,13 @@
-# project_x_migration_app_v3_fixed.py
+# project_x_mvp_full.py
 """
-Project X — Migration Ready v3 (Fixed & Completed)
-- Inputs: user-entered text shown in deep black
-- Priority weight tuning UI in sidebar (adjust weights in real time)
-- Priority Leads summary in Pipeline Board (red/orange/white)
-- Quick contact actions (Call, WhatsApp, Email) for each lead
-- Generates an Alembic-ready migration script (downloadable)
-- Keeps safe in-app ALTER migration as fallback
+Project X — Full Optimized Streamlit App (Dark UI)
+Single-file: DB + UI + Analytics + Migration generator
 """
 
 import os
 from datetime import datetime, timedelta
 import io
+import uuid
 
 import streamlit as st
 import pandas as pd
@@ -26,14 +22,14 @@ from sqlalchemy.orm import sessionmaker, relationship
 # ---------------------------
 # CONFIG
 # ---------------------------
-DB_FILE = os.getenv("PROJECT_X_DB", "project_x_migration_v3_fixed.db")
+DB_FILE = os.getenv("PROJECT_X_DB", "project_x_mvp_prod.db")
 DATABASE_URL = f"sqlite:///{DB_FILE}"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 
 # ---------------------------
-# MIGRATION COLUMNS (for in-app ALTER and Alembic script generator)
+# MIGRATION (columns to ensure exist)
 # ---------------------------
 MIGRATION_COLUMNS = {
     "contacted": ("BOOLEAN", "0"),
@@ -50,52 +46,59 @@ MIGRATION_COLUMNS = {
 }
 
 # ---------------------------
-# UI CSS: Roboto font, white labels, deep-black user input text, dark placeholders
+# DARK UI CSS (Roboto)
 # ---------------------------
-APP_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+APP_CSS = r"""
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;600;700&display=swap');
 
 :root{
-  --bg:#0b0f13;
-  --card:#0f1720;
+  --bg:#06070a;
+  --panel:#0f1720;
   --muted:#93a0ad;
   --white:#ffffff;
   --placeholder:#3a3a3a;
+  --accent:#2dd4bf;
+  --danger:#ff6b6b;
+  --warn:#ff9f43;
   --radius:10px;
+  --card-shadow: rgba(0,0,0,0.45);
 }
 
 /* base */
 body, .stApp {
-  background: linear-gradient(180deg, #06070a 0%, #0b0f13 100%);
+  background: linear-gradient(180deg, var(--bg) 0%, #0b0f13 100%);
   color: var(--white);
   font-family: 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* sidebar */
 section[data-testid="stSidebar"] {
   background: transparent !important;
   padding: 18px;
-  border-right: 1px solid rgba(255,255,255,0.03);
+  border-right: 1px solid rgba(255,255,255,0.04);
 }
 
 /* header */
 .header {
-  padding: 12px;
+  padding: 12px 14px;
   border-radius: 8px;
   color: var(--white);
   font-weight: 600;
-  font-size: 20px;
+  font-size: 18px;
+  margin-bottom: 8px;
 }
 
-/* panels */
-.panel {
-  background: rgba(255,255,255,0.03);
+/* panel card */
+.card {
+  background: rgba(255,255,255,0.02);
   padding: 12px;
   border-radius: var(--radius);
-  border: 1px solid rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.03);
+  box-shadow: 0 6px 18px var(--card-shadow);
 }
 
-/* make labels and general text white */
+/* labels + text */
 div, p, span, label {
   color: var(--white) !important;
 }
@@ -105,7 +108,7 @@ input::placeholder, textarea::placeholder {
   color: var(--placeholder) !important;
 }
 
-/* form inputs: transparent background, deep black typed text */
+/* form inputs - transparent background but black typed text */
 input, textarea, select {
   background: rgba(255,255,255,0.01) !important;
   color: #000000 !important; /* deep black for user-entered text */
@@ -122,18 +125,56 @@ input[type="datetime-local"], input[type="date"], input[type="time"] {
 button.stButton > button {
   background: transparent !important;
   color: var(--white) !important;
-  border: 1px solid var(--white) !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
   padding: 8px 12px !important;
   border-radius: 8px !important;
-  font-weight: 500 !important;
+  font-weight: 600 !important;
 }
 
-/* small kv */
+/* small muted text */
 .kv { color: var(--muted); font-size:13px; }
+
+/* reduce default large font sizes inside Streamlit elements */
+h1, .stMarkdown h1 { font-size: 20px !important; }
+h2, .stMarkdown h2 { font-size: 18px !important; }
+h3, .stMarkdown h3 { font-size: 16px !important; }
+p, .stText { font-size: 13px !important; }
+
+/* responsive pipeline rows */
+.pipeline-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.03);
+  background: rgba(255,255,255,0.01);
+}
+
+/* priority badges */
+.badge {
+  padding: 6px 8px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+/* small button inside html blocks */
+.html-btn {
+  display:inline-block;
+  padding:6px 10px;
+  border-radius:6px;
+  border:1px solid rgba(255,255,255,0.08);
+  background:transparent;
+  color:var(--white);
+  text-decoration:none;
+}
 """
 
 # ---------------------------
-# ORM MODELS (with pipeline fields)
+# ORM MODELS
 # ---------------------------
 class LeadStatus:
     NEW = "New"
@@ -151,7 +192,7 @@ class Lead(Base):
     id = Column(Integer, primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # source / contact
+    # contact / source
     source = Column(String, default="Unknown")
     source_details = Column(String, nullable=True)
     contact_name = Column(String, nullable=True)
@@ -171,7 +212,7 @@ class Lead(Base):
     sla_stage = Column(String, default=LeadStatus.NEW)
     sla_entered_at = Column(DateTime, default=datetime.utcnow)
 
-    # pipeline fields (new)
+    # added pipeline columns
     contacted = Column(Boolean, default=False)
     inspection_scheduled = Column(Boolean, default=False)
     inspection_scheduled_at = Column(DateTime, nullable=True)
@@ -215,24 +256,22 @@ class StageHistory(Base):
 
     lead = relationship("Lead", back_populates="history")
 
+
 # ---------------------------
-# DB init + in-app safe migration helpers
+# DB INIT & SAFE MIGRATION
 # ---------------------------
 def create_tables_if_missing():
     Base.metadata.create_all(bind=engine)
     inspector = inspect(engine)
     if "leads" not in inspector.get_table_names():
         return
-    existing_cols = {col["name"] for col in inspector.get_columns("leads")}
+    existing_cols = {c["name"] for c in inspector.get_columns("leads")}
     conn = engine.connect()
     for col_name, (col_type, default) in MIGRATION_COLUMNS.items():
         if col_name not in existing_cols:
-            # Choose SQL based on type
             if col_type == "BOOLEAN":
                 col_def = "INTEGER DEFAULT 0"
-            elif col_type == "DATETIME":
-                col_def = "TEXT"
-            elif col_type == "DATE":
+            elif col_type in ("DATETIME", "DATE"):
                 col_def = "TEXT"
             else:
                 col_def = "TEXT"
@@ -240,17 +279,20 @@ def create_tables_if_missing():
             try:
                 conn.execute(sql)
             except Exception as e:
-                print(f"Migration add column {col_name} failed: {e}")
+                print(f"[migration] add column {col_name} failed: {e}")
     conn.close()
+
 
 def init_db():
     create_tables_if_missing()
 
+
 # ---------------------------
-# DB helpers (CRUD)
+# CRUD helpers
 # ---------------------------
 def get_session():
     return SessionLocal()
+
 
 def add_lead(session, **kwargs):
     lead = Lead(
@@ -287,6 +329,7 @@ def add_lead(session, **kwargs):
     session.commit()
     return lead
 
+
 def change_stage(session, lead_id, new_stage, changed_by="user"):
     lead = session.query(Lead).filter(Lead.id == lead_id).first()
     if not lead:
@@ -301,11 +344,13 @@ def change_stage(session, lead_id, new_stage, changed_by="user"):
     session.commit()
     return lead
 
+
 def create_estimate(session, lead_id, amount, details=""):
     est = Estimate(lead_id=lead_id, amount=amount, created_at=datetime.utcnow(), details=details)
     session.add(est)
     session.commit()
     return est
+
 
 def mark_estimate_sent(session, estimate_id):
     est = session.query(Estimate).filter(Estimate.id == estimate_id).first()
@@ -313,6 +358,7 @@ def mark_estimate_sent(session, estimate_id):
     session.add(est)
     session.commit()
     return est
+
 
 def mark_estimate_approved(session, estimate_id):
     est = session.query(Estimate).filter(Estimate.id == estimate_id).first()
@@ -326,6 +372,7 @@ def mark_estimate_approved(session, estimate_id):
     session.commit()
     return est
 
+
 def mark_estimate_lost(session, estimate_id, reason="Lost"):
     est = session.query(Estimate).filter(Estimate.id == estimate_id).first()
     est.lost = True
@@ -338,30 +385,31 @@ def mark_estimate_lost(session, estimate_id, reason="Lost"):
     session.commit()
     return est
 
+
 def leads_df(session):
     return pd.read_sql(session.query(Lead).statement, session.bind)
+
 
 def estimates_df(session):
     return pd.read_sql(session.query(Estimate).statement, session.bind)
 
-# ---------------------------
-# Priority scoring (uses weights from sidebar)
-# ---------------------------
-def compute_priority_for_lead_row(lead_row, weights):
-    """
-    weights: dict with keys:
-      - value_weight (0..1)
-      - sla_weight (0..1)
-      - urgency_weight (0..1)
-      - contacted_w, inspection_w, estimate_w (0..1)
-      - value_baseline
-    Returns score 0..1 and components.
-    """
-    # estimated value normalization
-    val = float(lead_row.get("estimated_value") or 0.0)
-    value_score = min(val / (weights.get("value_baseline", 5000.0)), 1.0)
 
-    # time left calculation (hours)
+# ---------------------------
+# PRIORITY SCORING UTILITIES
+# ---------------------------
+def compute_priority_for_lead_row(lead_row: dict, weights: dict):
+    """
+    Returns:
+      score (0..1),
+      components: (value_score, sla_score, flags_tuple (contacted_flag, insp_flag, est_flag)),
+      time_left_hours
+    """
+    # value normalized
+    val = float(lead_row.get("estimated_value") or 0.0)
+    baseline = float(weights.get("value_baseline", 5000.0) or 5000.0)
+    value_score = min(val / baseline, 1.0)
+
+    # time left
     try:
         sla_entered = lead_row.get("sla_entered_at")
         if pd.isna(sla_entered) or sla_entered is None:
@@ -374,83 +422,87 @@ def compute_priority_for_lead_row(lead_row, weights):
     except Exception:
         time_left_h = 9999.0
 
-    # sla urgency score: 0..1 where <=0 =>1, 72 hours =>0
+    # sla urgency: more urgent when less time left (72h -> linear)
     sla_score = max(0.0, (72.0 - min(time_left_h, 72.0)) / 72.0)
 
-    # urgency flags
+    # flags
     contacted = bool(lead_row.get("contacted"))
-    inspection_scheduled = bool(lead_row.get("inspection_scheduled"))
-    estimate_submitted = bool(lead_row.get("estimate_submitted"))
+    insp_sch = bool(lead_row.get("inspection_scheduled"))
+    est_sub = bool(lead_row.get("estimate_submitted"))
 
-    # flags scoring (1 if missing, 0 if done)
     contacted_flag = 0.0 if contacted else 1.0
-    inspection_flag = 0.0 if inspection_scheduled else 1.0
-    estimate_flag = 0.0 if estimate_submitted else 1.0
+    insp_flag = 0.0 if insp_sch else 1.0
+    est_flag = 0.0 if est_sub else 1.0
 
-    # weighted sum (normalize by total weight)
-    total_weight = (weights["value_weight"] + weights["sla_weight"] + weights["urgency_weight"])
+    urgency_component = (contacted_flag * weights.get("contacted_w", 0.6)
+                         + insp_flag * weights.get("inspection_w", 0.5)
+                         + est_flag * weights.get("estimate_w", 0.5))
+
+    total_weight = weights.get("value_weight", 0.5) + weights.get("sla_weight", 0.35) + weights.get("urgency_weight", 0.15)
     if total_weight <= 0:
         total_weight = 1.0
-    urgency_component = (contacted_flag * weights["contacted_w"] + inspection_flag * weights["inspection_w"] + estimate_flag * weights["estimate_w"])
+
     score = (
-        value_score * weights["value_weight"]
-        + sla_score * weights["sla_weight"]
-        + urgency_component * weights["urgency_weight"]
+        value_score * weights.get("value_weight", 0.5)
+        + sla_score * weights.get("sla_weight", 0.35)
+        + urgency_component * weights.get("urgency_weight", 0.15)
     ) / total_weight
 
-    # clamp 0..1
     score = max(0.0, min(score, 1.0))
-    return score, value_score, sla_score, contacted_flag, inspection_flag, estimate_flag, time_left_h
+    return score, (value_score, sla_score, (contacted_flag, insp_flag, est_flag)), time_left_h
+
 
 # ---------------------------
-# Alembic migration generator helper
+# ALEMBIC SCRIPT GENERATOR
 # ---------------------------
 def generate_alembic_migration_script():
-    imports = (
-        "from alembic import op\n"
-        "import sqlalchemy as sa\n\n"
-    )
-    header = (
-        "\"\"\"auto migration: add pipeline fields\n\nRevision ID: add_pipeline_fields\nRevises: \nCreate Date: " + datetime.utcnow().isoformat() + "\n\"\"\"\n\n"
-        "revision = 'add_pipeline_fields'\n"
-        "down_revision = None\n"
-        "branch_labels = None\n"
-        "depends_on = None\n\n"
-    )
+    imports = "from alembic import op\nimport sqlalchemy as sa\n\n"
+    header = f'"""\nAuto migration: add pipeline fields\nCreate Date: {datetime.utcnow().isoformat()}\n"""\n\n'
     upgrade_lines = []
     for col, (typ, default) in MIGRATION_COLUMNS.items():
-        if typ == "BOOLEAN":
-            sa_type = "sa.Boolean()"
-        elif typ == "DATETIME":
-            sa_type = "sa.DateTime()"
-        elif typ == "DATE":
-            sa_type = "sa.Date()"
-        else:
-            sa_type = "sa.Text()"
+        sa_type = "sa.Boolean()" if typ == "BOOLEAN" else ("sa.DateTime()" if typ == "DATETIME" else ("sa.Date()" if typ == "DATE" else "sa.Text()"))
         upgrade_lines.append(f"    op.add_column('leads', sa.Column('{col}', {sa_type}, nullable=True))")
     upgrade_block = "def upgrade():\n" + "\n".join(upgrade_lines) + "\n\n"
-    downgrade_lines = []
-    for col in MIGRATION_COLUMNS.keys():
-        downgrade_lines.append(f"    op.drop_column('leads', '{col}')")
+    downgrade_lines = [f"    op.drop_column('leads', '{col}')" for col in MIGRATION_COLUMNS.keys()]
     downgrade_block = "def downgrade():\n" + "\n".join(downgrade_lines) + "\n"
     return imports + header + upgrade_block + downgrade_block
 
+
 # ---------------------------
-# STREAMLIT UI
+# SMALL HELPERS
 # ---------------------------
-st.set_page_config(page_title="Project X — Migration Ready v3 (Fixed)", layout="wide", initial_sidebar_state="expanded")
+def download_bytes(data_bytes: bytes, filename: str, mime: str = "application/octet-stream"):
+    st.download_button(label=f"Download {filename}", data=data_bytes, file_name=filename, mime=mime)
+
+
+# ---------------------------
+# STREAMLIT UI - INIT
+# ---------------------------
+st.set_page_config(page_title="Project X — Optimized (Full)", layout="wide", initial_sidebar_state="expanded")
 st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
 
-# Init DB (create + migrate lightly)
+# Initialize DB (safe)
 init_db()
 
 # Header
-st.markdown("<div class='header'>Project X — Sales & Conversion Tracker (v3)</div>", unsafe_allow_html=True)
+st.markdown("<div class='header'>Project X — Sales & Conversion Tracker (Full)</div>", unsafe_allow_html=True)
 
-# Sidebar: controls + priority weight tuning + migration generator
+# Ensure session-state defaults for weights
+if "weights" not in st.session_state:
+    st.session_state.weights = {
+        "value_weight": 0.5,
+        "sla_weight": 0.35,
+        "urgency_weight": 0.15,
+        "contacted_w": 0.6,
+        "inspection_w": 0.5,
+        "estimate_w": 0.5,
+        "value_baseline": 5000.0
+    }
+
+# Sidebar
 with st.sidebar:
     st.header("Control")
-    page = st.radio("Go to", ["Leads / Capture", "Pipeline Board", "Analytics & SLA", "Exports"], index=1)
+    page = st.radio("Go to", ["Leads / Capture", "Pipeline Board", "Analytics & SLA", "Exports"], index=0)
     st.markdown("---")
     if st.button("Add Demo Lead"):
         s = get_session()
@@ -472,17 +524,6 @@ with st.sidebar:
         st.success("Demo lead added")
     st.markdown("---")
     st.markdown("### Priority Weight Tuning")
-    # Persist weights in session_state to allow reuse
-    if "weights" not in st.session_state:
-        st.session_state.weights = {
-            "value_weight": 0.5,
-            "sla_weight": 0.35,
-            "urgency_weight": 0.15,
-            "contacted_w": 0.6,
-            "inspection_w": 0.5,
-            "estimate_w": 0.5,
-            "value_baseline": 5000.0
-        }
     w = st.session_state.weights
     w["value_weight"] = st.slider("Estimate value weight", 0.0, 1.0, float(w["value_weight"]), step=0.05)
     w["sla_weight"] = st.slider("SLA urgency weight", 0.0, 1.0, float(w["sla_weight"]), step=0.05)
@@ -498,12 +539,15 @@ with st.sidebar:
     st.markdown("Generate an Alembic-style migration script to add pipeline fields (optional).")
     if st.button("Generate Alembic migration script"):
         script = generate_alembic_migration_script()
-        st.download_button("Download Alembic script", data=script.encode("utf-8"), file_name="alembic_add_pipeline_fields.py", mime="text/x-python")
+        download_bytes(script.encode("utf-8"), "alembic_add_pipeline_fields.py", mime="text/x-python")
         st.success("Alembic script generated (download below).")
     st.markdown("---")
     st.markdown(f"DB: <small>{DB_FILE}</small>", unsafe_allow_html=True)
 
-# --- Page: Leads / Capture
+
+# ---------------------------
+# PAGE: Leads / Capture
+# ---------------------------
 if page == "Leads / Capture":
     st.header("📇 Lead Capture")
     with st.form("lead_form"):
@@ -540,7 +584,7 @@ if page == "Leads / Capture":
                 created_by="web_user"
             )
             st.success(f"Lead created (ID: {lead.id})")
-            st.rerun()
+            st.experimental_rerun()
 
     st.markdown("---")
     st.subheader("Recent leads")
@@ -549,9 +593,15 @@ if page == "Leads / Capture":
     if df.empty:
         st.info("No leads yet. Create one above.")
     else:
-        st.dataframe(df.sort_values('created_at', ascending=False).head(50))
+        # show recent in rows with selected columns
+        show_cols = ["id", "created_at", "contact_name", "contact_phone", "contact_email", "property_address", "damage_type", "assigned_to", "estimated_value", "status"]
+        display_df = df[show_cols].sort_values("created_at", ascending=False).head(50)
+        st.dataframe(display_df)
 
-# --- Page: Pipeline Board
+
+# ---------------------------
+# PAGE: Pipeline Board
+# ---------------------------
 elif page == "Pipeline Board":
     st.header("🧭 Pipeline Board")
     s = get_session()
@@ -559,18 +609,18 @@ elif page == "Pipeline Board":
     if not leads:
         st.info("No leads yet.")
     else:
-        # compute priorities using current weights
+        # prepare df for priority
         df = leads_df(s)
         weights = st.session_state.weights
         priority_list = []
         for _, row in df.iterrows():
-            score, value_score, sla_score, contacted_flag, inspection_flag, estimation_flag, time_left_h = compute_priority_for_lead_row(row, weights)
+            score, _, time_left_h = compute_priority_for_lead_row(row, weights)
             priority_list.append({
                 "id": int(row["id"]),
                 "contact_name": row.get("contact_name") or "",
                 "estimated_value": float(row.get("estimated_value") or 0.0),
                 "time_left_hours": float(time_left_h),
-                "priority_score": score,
+                "priority_score": float(score),
                 "status": row.get("status"),
             })
         pr_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
@@ -581,18 +631,20 @@ elif page == "Pipeline Board":
             for _, r in pr_df.head(8).iterrows():
                 score = r["priority_score"]
                 if score >= 0.7:
-                    color = "red"
+                    color = "var(--danger)"
                 elif score >= 0.45:
-                    color = "orange"
+                    color = "var(--warn)"
                 else:
-                    color = "white"
-
+                    color = "var(--white)"
                 html_block = f"""
-                <div style='padding:8px;border-radius:8px;margin-bottom:6px;border:1px solid rgba(255,255,255,0.04);'>
-                    <strong style='color:{color};'>#{int(r['id'])} — {r['contact_name'] or 'No name'}</strong>
-                    <span style='color:var(--muted);'> | Est: ${r['estimated_value']:,.0f}</span>
-                    <span style='color:var(--muted);'> | Time left: {int(r['time_left_hours'])}h</span>
-                    <span style='float:right;color:{color};'>Priority: {r['priority_score']:.2f}</span>
+                <div class='pipeline-row'>
+                  <div style='display:flex;gap:12px;align-items:center;'>
+                    <div style='font-weight:700;color:{color};'>#{int(r['id'])}</div>
+                    <div style='min-width:200px;'><strong>{r['contact_name'] or 'No name'}</strong></div>
+                    <div style='color:var(--muted);'>Est: ${r['estimated_value']:,.0f}</div>
+                    <div style='color:var(--muted);'>Time left: {int(r['time_left_hours'])}h</div>
+                  </div>
+                  <div><span class='badge' style='background:{color};color:#000'>{r['priority_score']:.2f}</span></div>
                 </div>
                 """
                 st.markdown(html_block, unsafe_allow_html=True)
@@ -600,92 +652,119 @@ elif page == "Pipeline Board":
             st.info("No priority leads yet.")
         st.markdown("---")
 
-        # Render each lead as the original stage-buckets style but with quick-contact and ability to edit in expander
-        cols = st.columns(len(LeadStatus.ALL))
+        # Show stage buckets as vertical lists, but each lead as a row (better alignment)
         buckets = {stg: [] for stg in LeadStatus.ALL}
         for l in leads:
             buckets[l.status].append(l)
 
+        # Layout: show buckets in columns but lead entries as rows inside each
+        cols = st.columns(len(LeadStatus.ALL))
         for i, stg in enumerate(LeadStatus.ALL):
             with cols[i]:
                 st.markdown(f"### {stg} ({len(buckets[stg])})")
                 for lead in buckets[stg]:
-                    with st.expander(f"#{lead.id} · {lead.contact_name or 'No name'} · ${lead.estimated_value or 0:,.0f}"):
-                        st.write(f"**Source:** {lead.source} · **Assigned:** {lead.assigned_to}")
-                        st.write(f"**Address:** {lead.property_address}")
-                        st.write(f"**Damage:** {lead.damage_type}")
-                        st.write(f"**Notes:** {lead.notes}")
-                        st.write(f"**Created:** {lead.created_at}")
+                    # row display
+                    # build contact quick actions html
+                    phone = (lead.contact_phone or "").strip()
+                    email = (lead.contact_email or "").strip()
+                    call_html = ""
+                    wa_html = ""
+                    email_html = ""
+                    if phone:
+                        tel_link = f"tel:{phone}"
+                        wa_link = f"https://wa.me/{phone.lstrip('+').replace(' ', '')}?text=Hi%2C%20we%20are%20following%20up%20on%20your%20restoration%20request."
+                        call_html = f"<a class='html-btn' href='{tel_link}'>📞 Call</a>"
+                        wa_html = f"<a class='html-btn' target='_blank' href='{wa_link}'>💬 WhatsApp</a>"
+                    if email:
+                        mail_link = f"mailto:{email}?subject=Follow%20up%20on%20your%20restoration%20request"
+                        email_html = f"<a class='html-btn' href='{mail_link}'>✉️ Email</a>"
 
-                        # quick contact actions (show only when data available)
-                        qc_cols = st.columns(3)
-                        phone = (lead.contact_phone or "").strip()
-                        email = (lead.contact_email or "").strip()
-                        if phone:
-                            tel_link = f"tel:{phone}"
-                            wa_link = f"https://wa.me/{phone.lstrip('+').replace(' ', '')}?text=Hi%2C%20we%20are%20following%20up%20on%20your%20restoration%20request."
-                            qc_cols[0].markdown(f"<a href='{tel_link}'><button>📞 Call</button></a>", unsafe_allow_html=True)
-                            qc_cols[1].markdown(f"<a href='{wa_link}' target='_blank'><button>💬 WhatsApp</button></a>", unsafe_allow_html=True)
-                        else:
-                            qc_cols[0].write(" ")
-                            qc_cols[1].write(" ")
-                        if email:
-                            mail_link = f"mailto:{email}?subject=Follow%20up%20on%20your%20restoration%20request"
-                            qc_cols[2].markdown(f"<a href='{mail_link}'><button>✉️ Email</button></a>", unsafe_allow_html=True)
-                        else:
-                            qc_cols[2].write(" ")
+                    # SLA calculation with robust parsing
+                    entered = lead.sla_entered_at or lead.created_at
+                    if isinstance(entered, str):
+                        try:
+                            entered = datetime.fromisoformat(entered)
+                        except Exception:
+                            entered = datetime.utcnow()
+                    deadline = entered + timedelta(hours=(lead.sla_hours or 24))
+                    remaining = deadline - datetime.utcnow()
+                    remaining_text = f"{str(remaining).split('.')[0]}" if remaining.total_seconds() > 0 else "OVERDUE"
 
-                        # SLA
-                        entered = lead.sla_entered_at or lead.created_at
-                        if isinstance(entered, str):
-                            try:
-                                entered = datetime.fromisoformat(entered)
-                            except Exception:
-                                entered = datetime.utcnow()
-                        deadline = entered + timedelta(hours=(lead.sla_hours or 24))
-                        remaining = deadline - datetime.utcnow()
-                        if remaining.total_seconds() <= 0:
-                            st.markdown(f"❗ **SLA OVERDUE** (was due {deadline.strftime('%Y-%m-%d %H:%M')})")
-                        else:
-                            st.markdown(f"⏳ SLA remaining: {str(remaining).split('.')[0]} (due {deadline.strftime('%Y-%m-%d %H:%M')})")
+                    # compact HTML row for quick view
+                    row_html = f"""
+                    <div class='pipeline-row'>
+                      <div style='display:flex;gap:8px;align-items:center;min-width:280px;'>
+                        <div style='font-weight:700;'>#{lead.id}</div>
+                        <div style='max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>
+                          <strong>{lead.contact_name or 'No name'}</strong><br/>
+                          <small style='color:var(--muted);'>{lead.property_address or ''}</small>
+                        </div>
+                      </div>
+                      <div style='display:flex;gap:8px;align-items:center;'>
+                        <div style='color:var(--muted);'>${lead.estimated_value or 0:,.0f}</div>
+                        <div style='color:var(--muted);'>{remaining_text}</div>
+                        <div>{call_html} {wa_html} {email_html}</div>
+                      </div>
+                    </div>
+                    """
+                    st.markdown(row_html, unsafe_allow_html=True)
 
-                        st.markdown("---")
-                        # Editable pipeline fields inside expander
+                    # Expander with full editable form (aligned like lead capture)
+                    with st.expander(f"Edit Lead #{lead.id} — {lead.contact_name or 'No name'}"):
                         with st.form(f"lead_edit_{lead.id}"):
-                            contact_name = st.text_input("Contact name", value=lead.contact_name or "", key=f"cname_{lead.id}")
-                            contact_phone = st.text_input("Contact phone", value=lead.contact_phone or "", key=f"cphone_{lead.id}")
-                            contact_email = st.text_input("Contact email", value=lead.contact_email or "", key=f"cemail_{lead.id}")
-                            assigned_to = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
-                            est_val = st.number_input("Estimated value (USD)", min_value=0.0, value=float(lead.estimated_value or 0.0), step=50.0, key=f"est_{lead.id}")
+                            colA, colB = st.columns(2)
+                            with colA:
+                                contact_name = st.text_input("Contact name", value=lead.contact_name or "", key=f"cname_{lead.id}")
+                                contact_phone = st.text_input("Contact phone", value=lead.contact_phone or "", key=f"cphone_{lead.id}")
+                                contact_email = st.text_input("Contact email", value=lead.contact_email or "", key=f"cemail_{lead.id}")
+                                assigned_to = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
+                            with colB:
+                                property_address = st.text_input("Property address", value=lead.property_address or "", key=f"addr_{lead.id}")
+                                damage_type = st.selectbox("Damage type", ["water", "fire", "mold", "contents", "reconstruction", "other"], index=0, key=f"dam_{lead.id}")
+                                est_val = st.number_input("Estimated value (USD)", min_value=0.0, value=float(lead.estimated_value or 0.0), step=50.0, key=f"est_{lead.id}")
+                                sla_hours_inp = st.number_input("SLA hours", min_value=1, value=int(lead.sla_hours or 24), step=1, key=f"sla_{lead.id}")
                             notes = st.text_area("Notes", value=lead.notes or "", key=f"notes_{lead.id}")
-                            contacted_choice = st.selectbox("Contacted?", ["No","Yes"], index=1 if lead.contacted else 0, key=f"cont_{lead.id}")
-                            insp_sch_choice = st.selectbox("Inspection Scheduled?", ["No","Yes"], index=1 if lead.inspection_scheduled else 0, key=f"inspsch_{lead.id}")
-                            if insp_sch_choice == "Yes":
-                                default_dt = lead.inspection_scheduled_at or datetime.utcnow()
-                                try:
-                                    if isinstance(default_dt, str):
-                                        default_dt = datetime.fromisoformat(default_dt)
-                                except Exception:
-                                    default_dt = datetime.utcnow()
-                                inspection_dt = st.datetime_input("Inspection date & time", value=default_dt, key=f"insp_dt_{lead.id}")
-                            else:
-                                inspection_dt = None
-                            insp_comp_choice = st.selectbox("Inspection Completed?", ["No","Yes"], index=1 if lead.inspection_completed else 0, key=f"inspcomp_{lead.id}")
-                            if insp_comp_choice == "Yes":
-                                default_dt2 = lead.inspection_completed_at or datetime.utcnow()
-                                try:
-                                    if isinstance(default_dt2, str):
-                                        default_dt2 = datetime.fromisoformat(default_dt2)
-                                except Exception:
-                                    default_dt2 = datetime.utcnow()
-                                inspection_comp_dt = st.datetime_input("Inspection completed at", value=default_dt2, key=f"insp_comp_dt_{lead.id}")
-                            else:
-                                inspection_comp_dt = None
-                            est_sub_choice = st.selectbox("Estimate Submitted?", ["No","Yes"], index=1 if lead.estimate_submitted else 0, key=f"estsub_{lead.id}")
-                            awarded_comment = st.text_input("Awarded comment (optional)", value=lead.awarded_comment or "", key=f"awcom_{lead.id}")
-                            awarded_date = st.date_input("Awarded date (optional)", value=(lead.awarded_date.date() if lead.awarded_date else datetime.utcnow().date()), key=f"awdate_{lead.id}")
-                            lost_comment = st.text_input("Lost comment (optional)", value=lead.lost_comment or "", key=f"lostcom_{lead.id}")
-                            lost_date = st.date_input("Lost date (optional)", value=(lead.lost_date.date() if lead.lost_date else datetime.utcnow().date()), key=f"lostdate_{lead.id}")
+                            # pipeline controls (two-column compact)
+                            colC, colD = st.columns(2)
+                            with colC:
+                                contacted_choice = st.selectbox("Contacted?", ["No", "Yes"], index=1 if lead.contacted else 0, key=f"cont_{lead.id}")
+                                insp_sch_choice = st.selectbox("Inspection Scheduled?", ["No", "Yes"], index=1 if lead.inspection_scheduled else 0, key=f"inspsch_{lead.id}")
+                                if insp_sch_choice == "Yes":
+                                    default_dt = lead.inspection_scheduled_at or datetime.utcnow()
+                                    try:
+                                        if isinstance(default_dt, str):
+                                            default_dt = datetime.fromisoformat(default_dt)
+                                    except Exception:
+                                        default_dt = datetime.utcnow()
+                                    inspection_dt = st.datetime_input("Inspection date & time", value=default_dt, key=f"insp_dt_{lead.id}")
+                                else:
+                                    inspection_dt = None
+                                insp_comp_choice = st.selectbox("Inspection Completed?", ["No", "Yes"], index=1 if lead.inspection_completed else 0, key=f"inspcomp_{lead.id}")
+                                if insp_comp_choice == "Yes":
+                                    default_dt2 = lead.inspection_completed_at or datetime.utcnow()
+                                    try:
+                                        if isinstance(default_dt2, str):
+                                            default_dt2 = datetime.fromisoformat(default_dt2)
+                                    except Exception:
+                                        default_dt2 = datetime.utcnow()
+                                    inspection_comp_dt = st.datetime_input("Inspection completed at", value=default_dt2, key=f"insp_comp_dt_{lead.id}")
+                                else:
+                                    inspection_comp_dt = None
+                            with colD:
+                                est_sub_choice = st.selectbox("Estimate Submitted?", ["No","Yes"], index=1 if lead.estimate_submitted else 0, key=f"estsub_{lead.id}")
+                                est_sub_dt = None
+                                if est_sub_choice == "Yes":
+                                    default_est_dt = lead.estimate_submitted_at or datetime.utcnow()
+                                    try:
+                                        if isinstance(default_est_dt, str):
+                                            default_est_dt = datetime.fromisoformat(default_est_dt)
+                                    except Exception:
+                                        default_est_dt = datetime.utcnow()
+                                    est_sub_dt = st.datetime_input("Estimate submitted at (optional)", value=default_est_dt, key=f"est_sub_dt_{lead.id}")
+                                awarded_comment = st.text_input("Awarded comment (optional)", value=lead.awarded_comment or "", key=f"awcom_{lead.id}")
+                                awarded_date = st.date_input("Awarded date (optional)", value=(lead.awarded_date.date() if lead.awarded_date else datetime.utcnow().date()), key=f"awdate_{lead.id}")
+                                lost_comment = st.text_input("Lost comment (optional)", value=lead.lost_comment or "", key=f"lostcom_{lead.id}")
+                                lost_date = st.date_input("Lost date (optional)", value=(lead.lost_date.date() if lead.lost_date else datetime.utcnow().date()), key=f"lostdate_{lead.id}")
                             new_stage = st.selectbox("Move lead stage", options=LeadStatus.ALL, index=LeadStatus.ALL.index(lead.status), key=f"stage_{lead.id}")
                             save = st.form_submit_button("Save Lead")
                             if save:
@@ -694,14 +773,18 @@ elif page == "Pipeline Board":
                                     lead.contact_phone = contact_phone.strip() or None
                                     lead.contact_email = contact_email.strip() or None
                                     lead.assigned_to = assigned_to.strip() or None
+                                    lead.property_address = property_address.strip() or None
+                                    lead.damage_type = damage_type
                                     lead.estimated_value = float(est_val) if est_val else None
                                     lead.notes = notes.strip() or None
+                                    lead.sla_hours = int(sla_hours_inp)
                                     lead.contacted = True if contacted_choice == "Yes" else False
                                     lead.inspection_scheduled = True if insp_sch_choice == "Yes" else False
                                     lead.inspection_scheduled_at = inspection_dt
                                     lead.inspection_completed = True if insp_comp_choice == "Yes" else False
                                     lead.inspection_completed_at = inspection_comp_dt
                                     lead.estimate_submitted = True if est_sub_choice == "Yes" else False
+                                    lead.estimate_submitted_at = est_sub_dt
                                     lead.awarded_comment = awarded_comment.strip() or None
                                     lead.awarded_date = datetime.combine(awarded_date, datetime.min.time()) if awarded_comment or awarded_date else None
                                     lead.lost_comment = lost_comment.strip() or None
@@ -713,11 +796,11 @@ elif page == "Pipeline Board":
                                     s.add(lead)
                                     s.commit()
                                     st.success(f"Lead #{lead.id} updated")
-                                    st.rerun()
+                                    st.experimental_rerun()
                                 except Exception as e:
                                     st.error(f"Failed saving lead: {e}")
 
-                        # Estimates and estimate actions below
+                        # estimates
                         st.markdown("---")
                         st.markdown("Estimates")
                         ests = s.query(Estimate).filter(Estimate.lead_id == lead.id).all()
@@ -734,7 +817,7 @@ elif page == "Pipeline Board":
                             if st.form_submit_button("Create Estimate", key=f"est_submit_{lead.id}"):
                                 create_estimate(s, lead.id, float(amt), details=details)
                                 st.success("Estimate created")
-                                st.rerun()
+                                st.experimental_rerun()
 
                         if ests:
                             first_est = ests[0]
@@ -743,19 +826,22 @@ elif page == "Pipeline Board":
                                 if st.button("Mark Sent", key=f"send_{first_est.id}"):
                                     mark_estimate_sent(s, first_est.id)
                                     st.success("Marked as sent")
-                                    st.rerun()
+                                    st.experimental_rerun()
                             with cb:
                                 if st.button("Mark Approved", key=f"app_{first_est.id}"):
                                     mark_estimate_approved(s, first_est.id)
                                     st.success("Estimate approved and lead marked Awarded")
-                                    st.rerun()
+                                    st.experimental_rerun()
                             with cc:
                                 if st.button("Mark Lost", key=f"lost_{first_est.id}"):
                                     mark_estimate_lost(s, first_est.id, reason="Lost to competitor")
                                     st.success("Estimate marked lost and lead moved to Lost")
-                                    st.rerun()
+                                    st.experimental_rerun()
 
-# --- Page: Analytics & SLA
+
+# ---------------------------
+# PAGE: Analytics & SLA
+# ---------------------------
 elif page == "Analytics & SLA":
     st.header("📈 Funnel Analytics & SLA Dashboard")
     s = get_session()
@@ -770,13 +856,13 @@ elif page == "Analytics & SLA":
         fig.update_layout(xaxis_title=None, yaxis_title="Number of Leads", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Summary & top priority (use same weighting)
+        # Summary & top priority
         st.markdown("### Summary & Priority")
         total_leads = len(df)
         awarded = len(df[df.status == LeadStatus.AWARDED])
         lost = len(df[df.status == LeadStatus.LOST])
-        contacted_cnt = len(df[df.contacted == True]) if "contacted" in df.columns else 0
-        insp_sched_cnt = len(df[df.inspection_scheduled == True]) if "inspection_scheduled" in df.columns else 0
+        contacted_cnt = int(df.contacted.sum()) if "contacted" in df.columns else 0
+        insp_sched_cnt = int(df.inspection_scheduled.sum()) if "inspection_scheduled" in df.columns else 0
         st.markdown(f"- Total leads: **{total_leads}**")
         st.markdown(f"- Awarded: **{awarded}**")
         st.markdown(f"- Lost: **{lost}**")
@@ -787,20 +873,20 @@ elif page == "Analytics & SLA":
         weights = st.session_state.weights
         priority_list = []
         for _, row in df.iterrows():
-            score, _, _, _, _, _, time_left = compute_priority_for_lead_row(row, weights)
+            score, _, time_left = compute_priority_for_lead_row(row, weights)
             priority_list.append({
                 "id": int(row["id"]),
                 "contact_name": row.get("contact_name") or "",
                 "estimated_value": float(row.get("estimated_value") or 0.0),
                 "time_left_hours": float(time_left),
-                "priority_score": score,
+                "priority_score": float(score),
                 "status": row.get("status")
             })
         p_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
         st.subheader("Top Priority Leads (by score)")
         if not p_df.empty:
             for _, r in p_df.head(10).iterrows():
-                color = "red" if r["priority_score"] >= 0.7 else ("orange" if r["priority_score"] >= 0.45 else "white")
+                color = "var(--danger)" if r["priority_score"] >= 0.7 else ("var(--warn)" if r["priority_score"] >= 0.45 else "var(--white)")
                 html_block = f"""
                 <div style='padding:8px;border-radius:8px;margin-bottom:6px;border:1px solid rgba(255,255,255,0.04);'>
                     <strong style='color:{color};'>#{int(r['id'])} — {r['contact_name'] or 'No name'}</strong>
@@ -838,11 +924,14 @@ elif page == "Analytics & SLA":
             })
         df_overdue = pd.DataFrame(overdue_rows)
         if not df_overdue.empty:
-            st.dataframe(df_overdue.sort_values("deadline"))
+            st.dataframe(df_overdue.sort_values(["overdue", "deadline"], ascending=[False, True]))
         else:
             st.info("No SLA overdue leads.")
 
-# --- Page: Exports
+
+# ---------------------------
+# PAGE: Exports
+# ---------------------------
 elif page == "Exports":
     st.header("📤 Export data")
     s = get_session()
@@ -858,5 +947,11 @@ elif page == "Exports":
         st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode('utf-8'), file_name="estimates.csv", mime="text/csv")
     if not df_hist.empty:
         st.download_button("Download stage_history.csv", df_hist.to_csv(index=False).encode('utf-8'), file_name="stage_history.csv", mime="text/csv")
+
+    st.markdown("---")
+    st.markdown("### Generate Alembic migration script")
+    script = generate_alembic_migration_script()
+    download_bytes(script.encode("utf-8"), "alembic_add_pipeline_fields.py", mime="text/x-python")
+    st.markdown("Done — use Alembic in your production environment if needed.")
 
 # End of file
