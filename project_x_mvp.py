@@ -1,9 +1,22 @@
-# project_x_full_fixed.py
+# project_x_step2_full.py
 """
-Project X — Full single-file app (fixed)
-- Replaces st.datetime_input with date+time inputs
-- Ensures forms have submit buttons
-- Adds priority tuning tip and improves dropdown hover styling
+Project X — Full single-file app with Step 2 SLA implementation (Option A)
+
+Features:
+- Lead Capture (form)
+- Pipeline Board (Clean Rows layout, fully editable)
+- Stage timestamp tracking for pipeline steps
+- Hard-coded SLA rules (Option A):
+    - Contacted: 4 hours
+    - Inspection Scheduled: 24 hours
+    - Inspection Completed: 48 hours
+    - Estimate Submitted: 24 hours
+- SLA countdown, overdue detection, and color-coded alerts
+- Analytics & SLA Dashboard
+- Exports (CSV)
+- SQLite + SQLAlchemy ORM with light in-app migration for pipeline columns
+- Priority scoring with tunable weights in sidebar
+- Styling (Roboto, dark UI, white labels, black user input text)
 """
 
 import os
@@ -21,15 +34,19 @@ from sqlalchemy.orm import sessionmaker, relationship
 # ---------------------------
 # CONFIG
 # ---------------------------
-DB_FILE = os.getenv("PROJECT_X_DB", "project_x_full.db")
+DB_FILE = os.getenv("PROJECT_X_DB", "project_x_step2_full.db")
 DATABASE_URL = f"sqlite:///{DB_FILE}"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 
-# pipeline columns for safe in-app migration (SQLite-compatible types)
+# ---------------------------
+# MIGRATION COLUMNS (SQLite friendly definitions)
+# Include stage timestamp fields (contacted_at, awarded_at, lost_at)
+# ---------------------------
 MIGRATION_COLUMNS = {
     "contacted": "INTEGER DEFAULT 0",
+    "contacted_at": "TEXT",
     "inspection_scheduled": "INTEGER DEFAULT 0",
     "inspection_scheduled_at": "TEXT",
     "inspection_completed": "INTEGER DEFAULT 0",
@@ -38,8 +55,10 @@ MIGRATION_COLUMNS = {
     "estimate_submitted_at": "TEXT",
     "awarded_comment": "TEXT",
     "awarded_date": "TEXT",
+    "awarded_at": "TEXT",
     "lost_comment": "TEXT",
     "lost_date": "TEXT",
+    "lost_at": "TEXT",
 }
 
 # ---------------------------
@@ -67,7 +86,7 @@ body, .stApp {
 /* sidebar */
 section[data-testid="stSidebar"] {
   background: transparent !important;
-  padding: 18px;
+  padding: 14px;
   border-right: 1px solid rgba(255,255,255,0.03);
 }
 
@@ -98,16 +117,6 @@ input, textarea, select {
   border: 1px solid rgba(255,255,255,0.06) !important;
 }
 
-/* try to style dropdown options hover to black where browser allows */
-select option {
-  background: #000000 !important;
-  color: #ffffff !important;
-}
-select:hover, select:focus {
-  background: #000000 !important;
-  color: #ffffff !important;
-}
-
 /* date/time pickers */
 input[type="datetime-local"], input[type="date"], input[type="time"] {
   color: #000000 !important;
@@ -121,6 +130,12 @@ button.stButton > button {
   padding: 8px 12px !important;
   border-radius: 8px !important;
   font-weight: 500 !important;
+}
+
+/* Dropdown option hover - attempt to make hover black background and white text */
+select option:hover, select option:checked {
+  background: #000000 !important;
+  color: #ffffff !important;
 }
 
 /* small kv */
@@ -167,6 +182,7 @@ class Lead(Base):
 
     # pipeline extra fields (migration may add them)
     contacted = Column(Boolean, default=False)
+    contacted_at = Column(DateTime, nullable=True)
     inspection_scheduled = Column(Boolean, default=False)
     inspection_scheduled_at = Column(DateTime, nullable=True)
     inspection_completed = Column(Boolean, default=False)
@@ -175,8 +191,10 @@ class Lead(Base):
     estimate_submitted_at = Column(DateTime, nullable=True)
     awarded_comment = Column(Text, nullable=True)
     awarded_date = Column(DateTime, nullable=True)
+    awarded_at = Column(DateTime, nullable=True)
     lost_comment = Column(Text, nullable=True)
     lost_date = Column(DateTime, nullable=True)
+    lost_at = Column(DateTime, nullable=True)
 
     estimates = relationship("Estimate", back_populates="lead", cascade="all, delete-orphan")
 
@@ -241,6 +259,7 @@ def add_lead(session, **kwargs):
         sla_stage=LeadStatus.NEW,
         sla_entered_at=datetime.utcnow(),
         contacted=kwargs.get("contacted", False),
+        contacted_at=kwargs.get("contacted_at"),
         inspection_scheduled=kwargs.get("inspection_scheduled", False),
         inspection_scheduled_at=kwargs.get("inspection_scheduled_at"),
         inspection_completed=kwargs.get("inspection_completed", False),
@@ -249,8 +268,10 @@ def add_lead(session, **kwargs):
         estimate_submitted_at=kwargs.get("estimate_submitted_at"),
         awarded_comment=kwargs.get("awarded_comment"),
         awarded_date=kwargs.get("awarded_date"),
+        awarded_at=kwargs.get("awarded_at"),
         lost_comment=kwargs.get("lost_comment"),
         lost_date=kwargs.get("lost_date"),
+        lost_at=kwargs.get("lost_at"),
     )
     session.add(lead)
     session.commit()
@@ -284,6 +305,7 @@ def mark_estimate_approved(session, estimate_id):
         lead = est.lead
         lead.status = LeadStatus.AWARDED
         lead.awarded_date = datetime.utcnow()
+        lead.awarded_at = datetime.utcnow()
         session.add(lead)
         session.commit()
     return est
@@ -297,6 +319,7 @@ def mark_estimate_lost(session, estimate_id, reason="Lost"):
         lead = est.lead
         lead.status = LeadStatus.LOST
         lead.lost_date = datetime.utcnow()
+        lead.lost_at = datetime.utcnow()
         session.add(lead)
         session.commit()
     return est
@@ -349,12 +372,51 @@ def compute_priority_for_lead_row(lead_row, weights):
     return score, value_score, sla_score, contacted_flag, inspection_flag, estimate_flag, time_left_h
 
 # ---------------------------
+# SLA rules (Option A: Hard-coded)
+# Each SLA entry describes hours allowed for that stage and the timestamp field to read
+# ---------------------------
+SLA_RULES = {
+    LeadStatus.CONTACTED: {"hours": 4, "ts_field": "contacted_at"},
+    LeadStatus.INSPECTION_SCHEDULED: {"hours": 24, "ts_field": "inspection_scheduled_at"},
+    LeadStatus.INSPECTION_COMPLETED: {"hours": 48, "ts_field": "inspection_completed_at"},
+    LeadStatus.ESTIMATE_SUBMITTED: {"hours": 24, "ts_field": "estimate_submitted_at"},
+    # For Awarded and Lost we don't set SLA countdowns — they are terminal states
+}
+
+def get_stage_deadline_and_remaining(lead):
+    """
+    Returns (deadline_datetime_or_None, remaining_timedelta_or_None, sla_hours_used)
+    Based on lead.sla_stage and corresponding timestamp field (falls back to sla_entered_at)
+    """
+    now = datetime.utcnow()
+    stage = lead.sla_stage or lead.status or LeadStatus.NEW
+    if stage in SLA_RULES:
+        rule = SLA_RULES[stage]
+        sla_hours = rule["hours"]
+        ts_field = rule["ts_field"]
+        ts_val = getattr(lead, ts_field, None)
+        # fallback to sla_entered_at or created_at
+        if not ts_val:
+            ts_val = lead.sla_entered_at or lead.created_at or now
+        # if it's a string (older DB), try parse
+        if isinstance(ts_val, str):
+            try:
+                ts_val = datetime.fromisoformat(ts_val)
+            except Exception:
+                ts_val = now
+        deadline = ts_val + timedelta(hours=sla_hours)
+        remaining = deadline - now
+        return deadline, remaining, sla_hours
+    # no SLA for this stage
+    return None, None, None
+
+# ---------------------------
 # App UI
 # ---------------------------
-st.set_page_config(page_title="Project X — CRM", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Project X — CRM (Step 2 SLA)", layout="wide", initial_sidebar_state="expanded")
 st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
 init_db()
-st.markdown("<div class='header'>Project X — Sales & Conversion Tracker</div>", unsafe_allow_html=True)
+st.markdown("<div class='header'>Project X — Sales & Conversion Tracker — SLA (Step 2)</div>", unsafe_allow_html=True)
 
 # Sidebar controls
 with st.sidebar:
@@ -370,7 +432,6 @@ with st.sidebar:
             "value_baseline": 5000.0
         }
     st.markdown("### Priority weight tuning")
-    st.caption("Tip: increase 'SLA urgency weight' to prioritize leads close to SLA expiry; increase 'Estimate value weight' to prioritize high-value jobs.")
     st.session_state.weights["value_weight"] = st.slider("Estimate value weight", 0.0, 1.0, float(st.session_state.weights["value_weight"]), step=0.05)
     st.session_state.weights["sla_weight"] = st.slider("SLA urgency weight", 0.0, 1.0, float(st.session_state.weights["sla_weight"]), step=0.05)
     st.session_state.weights["urgency_weight"] = st.slider("Flags urgency weight", 0.0, 1.0, float(st.session_state.weights["urgency_weight"]), step=0.05)
@@ -381,6 +442,13 @@ with st.sidebar:
     st.session_state.weights["value_baseline"] = st.number_input("Value baseline", min_value=100.0, value=float(st.session_state.weights["value_baseline"]), step=100.0)
 
     st.markdown("---")
+    st.markdown("Priority tip:")
+    st.markdown("Adjust weights to tune how much 'estimated value' vs 'SLA urgency' vs 'missing actions' affect priority ranking.")
+    st.markdown("- Increase **Estimate value weight** to favor high-value jobs.")
+    st.markdown("- Increase **SLA urgency** to prioritize leads close to SLA deadlines.")
+    st.markdown("- Increase **Flags urgency** to prioritize leads with missing contact/inspection/estimate actions.")
+    st.markdown("---")
+
     if st.button("Add Demo Lead"):
         s = get_session()
         add_lead(s,
@@ -506,7 +574,9 @@ elif page == "Pipeline Board":
                     st.markdown(f"**Notes:** {lead.notes or '—'}")
                     st.markdown(f"**Created:** {lead.created_at}")
                 with col_b:
-                    # compute and show priority for this specific lead
+                    # compute and show SLA-based priority / status for this specific lead
+                    deadline, remaining, sla_hours_used = get_stage_deadline_and_remaining(lead)
+                    # derive priority score per current weights
                     try:
                         single_row = df[df["id"] == lead.id].iloc[0].to_dict()
                         score, _, _, _, _, _, time_left_h = compute_priority_for_lead_row(single_row, weights)
@@ -515,7 +585,22 @@ elif page == "Pipeline Board":
                         time_left_h = 9999
                     priority_label = ("High" if score >= 0.7 else "Medium" if score >= 0.45 else "Normal")
                     priority_color = "red" if score >= 0.7 else ("orange" if score >= 0.45 else "white")
-                    st.markdown(f"<div style='text-align:right'><strong style='color:{priority_color};'>{priority_label}</strong><br><span style='color:var(--muted);'>Score: {score:.2f}</span></div>", unsafe_allow_html=True)
+                    # SLA color for current stage
+                    sla_color = "white"
+                    sla_text = "No SLA"
+                    if remaining is not None:
+                        if remaining.total_seconds() <= 0:
+                            sla_color = "red"
+                            sla_text = f"OVERDUE by {str(abs(remaining)).split('.')[0]}"
+                        else:
+                            pct = remaining.total_seconds() / (sla_hours_used * 3600.0) if sla_hours_used else 1.0
+                            if pct <= 0.3:
+                                sla_color = "orange"
+                                sla_text = f"At risk — {str(remaining).split('.')[0]} left"
+                            else:
+                                sla_color = "white"
+                                sla_text = f"{str(remaining).split('.')[0]} left"
+                    st.markdown(f"<div style='text-align:right'><strong style='color:{priority_color};'>{priority_label}</strong><br><span style='color:{sla_color};'>{sla_text}</span><br><span style='color:var(--muted);'>Score: {score:.2f}</span></div>", unsafe_allow_html=True)
 
                 st.markdown("---")
 
@@ -538,19 +623,14 @@ elif page == "Pipeline Board":
                     qc3.write(" ")
                 qc4.write("")  # spacer column
 
-                # SLA countdown display
-                entered = lead.sla_entered_at or lead.created_at
-                if isinstance(entered, str):
-                    try:
-                        entered = datetime.fromisoformat(entered)
-                    except Exception:
-                        entered = datetime.utcnow()
-                deadline = entered + timedelta(hours=(lead.sla_hours or 24))
-                remaining = deadline - datetime.utcnow()
-                if remaining.total_seconds() <= 0:
-                    st.markdown(f"❗ <strong style='color:red;'>SLA OVERDUE</strong> — was due {deadline.strftime('%Y-%m-%d %H:%M')}", unsafe_allow_html=True)
+                # SLA countdown display (explicit)
+                if remaining is not None:
+                    if remaining.total_seconds() <= 0:
+                        st.markdown(f"❗ <strong style='color:red;'>SLA OVERDUE</strong> — was due {deadline.strftime('%Y-%m-%d %H:%M')}", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"⏳ SLA remaining: {str(remaining).split('.')[0]} (due {deadline.strftime('%Y-%m-%d %H:%M')})")
                 else:
-                    st.markdown(f"⏳ SLA remaining: {str(remaining).split('.')[0]} (due {deadline.strftime('%Y-%m-%d %H:%M')})")
+                    st.markdown("— No SLA for current stage (terminal or unset)")
 
                 st.markdown("---")
 
@@ -563,12 +643,7 @@ elif page == "Pipeline Board":
                         contact_phone = st.text_input("Contact phone", value=lead.contact_phone or "", key=f"cphone_{lead.id}")
                         contact_email = st.text_input("Contact email", value=lead.contact_email or "", key=f"cemail_{lead.id}")
                         property_address = st.text_input("Property address", value=lead.property_address or "", key=f"addr_{lead.id}")
-                        damage_type = st.selectbox(
-                            "Damage type",
-                            ["water","fire","mold","contents","reconstruction","other"],
-                            index=(["water","fire","mold","contents","reconstruction","other"].index(lead.damage_type) if lead.damage_type in ["water","fire","mold","contents","reconstruction","other"] else 5),
-                            key=f"damage_{lead.id}"
-                        )
+                        damage_type = st.selectbox("Damage type", ["water","fire","mold","contents","reconstruction","other"], index=(["water","fire","mold","contents","reconstruction","other"].index(lead.damage_type) if lead.damage_type in ["water","fire","mold","contents","reconstruction","other"] else 5), key=f"damage_{lead.id}")
                     with c2:
                         assigned_to = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
                         est_val = st.number_input("Estimated value (USD)", min_value=0.0, value=float(lead.estimated_value or 0.0), step=50.0, key=f"est_{lead.id}")
@@ -584,19 +659,13 @@ elif page == "Pipeline Board":
                         contacted_choice = st.selectbox("Contacted?", ["No", "Yes"], index=1 if lead.contacted else 0, key=f"cont_{lead.id}")
                         inspection_scheduled_choice = st.selectbox("Inspection Scheduled?", ["No", "Yes"], index=1 if lead.inspection_scheduled else 0, key=f"inspsch_{lead.id}")
                         if inspection_scheduled_choice == "Yes":
-                            # use date + time inputs and combine
                             default_dt = lead.inspection_scheduled_at or datetime.utcnow()
                             if isinstance(default_dt, str):
                                 try:
                                     default_dt = datetime.fromisoformat(default_dt)
                                 except Exception:
                                     default_dt = datetime.utcnow()
-                            inspection_date = st.date_input("Inspection date", value=default_dt.date(), key=f"insp_date_{lead.id}")
-                            inspection_time = st.time_input("Inspection time", value=default_dt.time(), key=f"insp_time_{lead.id}")
-                            try:
-                                inspection_dt = datetime.combine(inspection_date, inspection_time)
-                            except Exception:
-                                inspection_dt = datetime.utcnow()
+                            inspection_dt = st.datetime_input("Inspection date & time", value=default_dt, key=f"insp_dt_{lead.id}")
                         else:
                             inspection_dt = None
                     with colf2:
@@ -608,12 +677,7 @@ elif page == "Pipeline Board":
                                     default_dt2 = datetime.fromisoformat(default_dt2)
                                 except Exception:
                                     default_dt2 = datetime.utcnow()
-                            inspection_comp_date = st.date_input("Inspection completed date", value=default_dt2.date(), key=f"insp_comp_date_{lead.id}")
-                            inspection_comp_time = st.time_input("Inspection completed time", value=default_dt2.time(), key=f"insp_comp_time_{lead.id}")
-                            try:
-                                inspection_comp_dt = datetime.combine(inspection_comp_date, inspection_comp_time)
-                            except Exception:
-                                inspection_comp_dt = datetime.utcnow()
+                            inspection_comp_dt = st.datetime_input("Inspection completed at", value=default_dt2, key=f"insp_comp_dt_{lead.id}")
                         else:
                             inspection_comp_dt = None
                         estimate_sub_choice = st.selectbox("Estimate Submitted?", ["No","Yes"], index=1 if lead.estimate_submitted else 0, key=f"estsub_{lead.id}")
@@ -641,19 +705,73 @@ elif page == "Pipeline Board":
                             lead.estimated_value = float(est_val) if est_val else None
                             lead.notes = notes.strip() or None
                             lead.sla_hours = int(sla_hours)
-                            # pipeline flags
-                            lead.contacted = True if contacted_choice == "Yes" else False
-                            lead.inspection_scheduled = True if inspection_scheduled_choice == "Yes" else False
-                            lead.inspection_scheduled_at = inspection_dt
-                            lead.inspection_completed = True if inspection_completed_choice == "Yes" else False
-                            lead.inspection_completed_at = inspection_comp_dt
-                            lead.estimate_submitted = True if estimate_sub_choice == "Yes" else False
-                            lead.estimate_submitted_at = (datetime.combine(est_submitted_at, datetime.min.time()) if est_submitted_at else None)
-                            lead.awarded_comment = awarded_comment.strip() or None
-                            lead.awarded_date = (datetime.combine(awarded_date, datetime.min.time()) if awarded_comment or awarded_date else None)
-                            lead.lost_comment = lost_comment.strip() or None
-                            lead.lost_date = (datetime.combine(lost_date, datetime.min.time()) if lost_comment or lost_date else None)
-                            # status change
+                            # pipeline flags & set timestamps when toggled from No->Yes
+                            prev_contacted = bool(lead.contacted)
+                            new_contacted = True if contacted_choice == "Yes" else False
+                            if new_contacted and not prev_contacted:
+                                lead.contacted_at = datetime.utcnow()
+                            lead.contacted = new_contacted
+
+                            prev_inspsch = bool(lead.inspection_scheduled)
+                            new_inspsch = True if inspection_scheduled_choice == "Yes" else False
+                            if new_inspsch and not prev_inspsch and inspection_dt:
+                                lead.inspection_scheduled_at = inspection_dt
+                            elif new_inspsch and not prev_inspsch:
+                                lead.inspection_scheduled_at = datetime.utcnow()
+                            elif not new_inspsch:
+                                lead.inspection_scheduled_at = None
+                            lead.inspection_scheduled = new_inspsch
+
+                            prev_inspcomp = bool(lead.inspection_completed)
+                            new_inspcomp = True if inspection_completed_choice == "Yes" else False
+                            if new_inspcomp and not prev_inspcomp and inspection_comp_dt:
+                                lead.inspection_completed_at = inspection_comp_dt
+                            elif new_inspcomp and not prev_inspcomp:
+                                lead.inspection_completed_at = datetime.utcnow()
+                            elif not new_inspcomp:
+                                lead.inspection_completed_at = None
+                            lead.inspection_completed = new_inspcomp
+
+                            prev_estsub = bool(lead.estimate_submitted)
+                            new_estsub = True if estimate_sub_choice == "Yes" else False
+                            if new_estsub and not prev_estsub and est_submitted_at:
+                                lead.estimate_submitted_at = datetime.combine(est_submitted_at, datetime.min.time())
+                            elif new_estsub and not prev_estsub:
+                                lead.estimate_submitted_at = datetime.utcnow()
+                            elif not new_estsub:
+                                lead.estimate_submitted_at = None
+                            lead.estimate_submitted = new_estsub
+
+                            # Awarded / Lost
+                            prev_awarded = bool(lead.awarded_comment or lead.awarded_date or lead.awarded_at)
+                            new_awcom = awarded_comment.strip() or None
+                            new_awdate = awarded_date if awarded_date else None
+                            if new_awcom or new_awdate:
+                                # set awarded fields and timestamp if newly awarded
+                                lead.awarded_comment = new_awcom
+                                lead.awarded_date = datetime.combine(new_awdate, datetime.min.time()) if new_awdate else lead.awarded_date
+                                if not prev_awarded:
+                                    lead.awarded_at = datetime.utcnow()
+                                lead.status = LeadStatus.AWARDED
+                                lead.awarded_date = lead.awarded_date or datetime.utcnow()
+                            else:
+                                # if user clears award inputs, don't force change of status automatically
+                                lead.awarded_comment = None
+
+                            prev_lost = bool(lead.lost_comment or lead.lost_date or lead.lost_at)
+                            new_lostcom = lost_comment.strip() or None
+                            new_lostdate = lost_date if lost_date else None
+                            if new_lostcom or new_lostdate:
+                                lead.lost_comment = new_lostcom
+                                lead.lost_date = datetime.combine(new_lostdate, datetime.min.time()) if new_lostdate else lead.lost_date
+                                if not prev_lost:
+                                    lead.lost_at = datetime.utcnow()
+                                lead.status = LeadStatus.LOST
+                                lead.lost_date = lead.lost_date or datetime.utcnow()
+                            else:
+                                lead.lost_comment = None
+
+                            # status change (explicit)
                             if status_choice != lead.status:
                                 lead.status = status_choice
                                 lead.sla_stage = status_choice
@@ -735,7 +853,7 @@ elif page == "Analytics & SLA":
         fig.update_layout(xaxis_title=None, yaxis_title="Number of Leads", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Summary note
+        # Summary & SLA health counts
         st.markdown("### Summary")
         total_leads = len(df)
         awarded = len(df[df.status == LeadStatus.AWARDED])
@@ -748,6 +866,54 @@ elif page == "Analytics & SLA":
         st.markdown(f"- Contacted: **{contacted_cnt}**")
         st.markdown(f"- Inspections scheduled: **{insp_sched_cnt}**")
 
+        # Compute SLA health categories (Overdue / At risk / Healthy)
+        overdue = []
+        at_risk = []
+        healthy = []
+        for _, row in df.iterrows():
+            # load lead object fields for deadline detection
+            # row.sla_entered_at may be string
+            try:
+                sla_stage = row.get("sla_stage") or row.get("status")
+                # convert row to a minimal object-like dict for get_stage_deadline_and_remaining
+                # we'll recreate a small helper object using types.SimpleNamespace is overkill; just compute here
+                # Reuse logic: get timestamp field from SLA_RULES if applicable
+                if sla_stage in SLA_RULES:
+                    rule = SLA_RULES[sla_stage]
+                    ts_field = rule["ts_field"]
+                    sla_hours = rule["hours"]
+                    ts_val = row.get(ts_field) or row.get("sla_entered_at") or row.get("created_at")
+                    if isinstance(ts_val, str):
+                        try:
+                            ts_val = datetime.fromisoformat(ts_val)
+                        except Exception:
+                            ts_val = datetime.utcnow()
+                    deadline = ts_val + timedelta(hours=sla_hours)
+                    remaining = deadline - datetime.utcnow()
+                    if remaining.total_seconds() <= 0:
+                        overdue.append({"id": row["id"], "contact": row.get("contact_name"), "stage": sla_stage, "deadline": deadline})
+                    else:
+                        pct = remaining.total_seconds() / (sla_hours * 3600.0) if sla_hours else 1.0
+                        if pct <= 0.3:
+                            at_risk.append({"id": row["id"], "contact": row.get("contact_name"), "stage": sla_stage, "deadline": deadline, "remaining": remaining})
+                        else:
+                            healthy.append({"id": row["id"], "contact": row.get("contact_name"), "stage": sla_stage, "deadline": deadline, "remaining": remaining})
+            except Exception:
+                # ignore rows that fail parsing
+                pass
+
+        st.subheader("SLA Health")
+        st.markdown(f"- Overdue: **{len(overdue)}**  — At risk: **{len(at_risk)}**  — Healthy: **{len(healthy)}**")
+        if overdue:
+            st.markdown("#### Overdue leads")
+            for o in overdue:
+                st.markdown(f"- ❗ Lead #{o['id']} — {o.get('contact') or 'No name'} — Stage: {o['stage']} — due {o['deadline'].strftime('%Y-%m-%d %H:%M')}")
+        if at_risk:
+            st.markdown("#### At-risk leads (<=30% time left)")
+            for a in at_risk:
+                st.markdown(f"- ⚠️ Lead #{a['id']} — {a.get('contact') or 'No name'} — Stage: {a['stage']} — time left {str(a['remaining']).split('.')[0]}")
+        st.markdown("---")
+
         # Conversion by source
         st.subheader("Conversion by Source")
         conv = df.copy()
@@ -755,35 +921,6 @@ elif page == "Analytics & SLA":
         conv_summary = conv.groupby("source").agg(leads=("id", "count"), awarded=("awarded_flag", "sum")).reset_index()
         conv_summary["conversion_rate"] = (conv_summary["awarded"] / conv_summary["leads"] * 100).round(1)
         st.dataframe(conv_summary.sort_values("leads", ascending=False))
-
-        # SLA overdue
-        st.subheader("SLA / Overdue Leads")
-        overdue_rows = []
-        for _, row in df.iterrows():
-            sla_entered_at = row["sla_entered_at"]
-            try:
-                if pd.isna(sla_entered_at):
-                    sla_entered_at = datetime.utcnow()
-                elif isinstance(sla_entered_at, str):
-                    sla_entered_at = datetime.fromisoformat(sla_entered_at)
-            except Exception:
-                sla_entered_at = datetime.utcnow()
-            sla_hours = int(row["sla_hours"]) if pd.notna(row["sla_hours"]) else 24
-            deadline = sla_entered_at + timedelta(hours=sla_hours)
-            remaining = deadline - datetime.utcnow()
-            overdue_rows.append({
-                "id": row["id"],
-                "contact": row["contact_name"],
-                "status": row["status"],
-                "sla_stage": row["sla_stage"],
-                "deadline": deadline,
-                "overdue": remaining.total_seconds() <= 0
-            })
-        df_overdue = pd.DataFrame(overdue_rows)
-        if not df_overdue.empty:
-            st.dataframe(df_overdue.sort_values("deadline"))
-        else:
-            st.info("No SLA overdue leads.")
 
 # --- Page: Exports
 elif page == "Exports":
@@ -800,3 +937,5 @@ elif page == "Exports":
         df_est = estimates_df(s)
         if not df_est.empty:
             st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode('utf-8'), file_name="estimates.csv", mime="text/csv")
+
+# End of file
