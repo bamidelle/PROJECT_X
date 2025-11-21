@@ -1,3 +1,435 @@
+# project_x_full.py
+"""
+Project X — Full single-file app
+- Lead Capture (form)
+- Pipeline Board (Clean Rows layout, fully editable)
+- Analytics & SLA dashboard
+- Exports (CSV)
+- SQLite + SQLAlchemy ORM with light in-app migration for pipeline columns
+- Priority scoring with tunable weights in sidebar
+- Styling (Roboto, dark UI, white labels, black user input text)
+"""
+
+import os
+from datetime import datetime, timedelta
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, inspect
+)
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+DB_FILE = os.getenv("PROJECT_X_DB", "project_x_full.db")
+DATABASE_URL = f"sqlite:///{DB_FILE}"
+Base = declarative_base()
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine)
+
+# pipeline columns for safe in-app migration (SQLite-compatible types)
+MIGRATION_COLUMNS = {
+    "contacted": "INTEGER DEFAULT 0",
+    "inspection_scheduled": "INTEGER DEFAULT 0",
+    "inspection_scheduled_at": "TEXT",
+    "inspection_completed": "INTEGER DEFAULT 0",
+    "inspection_completed_at": "TEXT",
+    "estimate_submitted": "INTEGER DEFAULT 0",
+    "estimate_submitted_at": "TEXT",
+    "awarded_comment": "TEXT",
+    "awarded_date": "TEXT",
+    "lost_comment": "TEXT",
+    "lost_date": "TEXT",
+}
+
+# ---------------------------
+# CSS / UI
+# ---------------------------
+APP_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
+:root{
+  --bg:#0b0f13;
+  --card:#0f1720;
+  --muted:#93a0ad;
+  --white:#ffffff;
+  --placeholder:#3a3a3a;
+  --radius:10px;
+}
+
+/* base */
+body, .stApp {
+  background: linear-gradient(180deg, #06070a 0%, #0b0f13 100%);
+  color: var(--white);
+  font-family: 'Roboto', sans-serif;
+}
+
+/* sidebar */
+section[data-testid="stSidebar"] {
+  background: transparent !important;
+  padding: 18px;
+  border-right: 1px solid rgba(255,255,255,0.03);
+}
+
+/* header */
+.header {
+  padding: 12px;
+  border-radius: 8px;
+  color: var(--white);
+  font-weight: 600;
+  font-size: 18px;
+}
+
+/* make labels and general text white */
+div, p, span, label {
+  color: var(--white) !important;
+}
+
+/* placeholder color */
+input::placeholder, textarea::placeholder {
+  color: var(--placeholder) !important;
+}
+
+/* form inputs: transparent background, deep black typed text */
+input, textarea, select {
+  background: rgba(255,255,255,0.01) !important;
+  color: #000000 !important; /* deep black for user-entered text */
+  border-radius: 8px !important;
+  border: 1px solid rgba(255,255,255,0.06) !important;
+}
+
+/* date/time pickers */
+input[type="datetime-local"], input[type="date"], input[type="time"] {
+  color: #000000 !important;
+}
+
+/* transparent button with white border & white text */
+button.stButton > button {
+  background: transparent !important;
+  color: var(--white) !important;
+  border: 1px solid var(--white) !important;
+  padding: 8px 12px !important;
+  border-radius: 8px !important;
+  font-weight: 500 !important;
+}
+
+/* small kv */
+.kv { color: var(--muted); font-size:13px; }
+"""
+
+# ---------------------------
+# ORM MODELS
+# ---------------------------
+class LeadStatus:
+    NEW = "New"
+    CONTACTED = "Contacted"
+    INSPECTION_SCHEDULED = "Inspection Scheduled"
+    INSPECTION_COMPLETED = "Inspection Completed"
+    ESTIMATE_SUBMITTED = "Estimate Submitted"
+    AWARDED = "Awarded"
+    LOST = "Lost"
+    ALL = [NEW, CONTACTED, INSPECTION_SCHEDULED, INSPECTION_COMPLETED, ESTIMATE_SUBMITTED, AWARDED, LOST]
+
+class Lead(Base):
+    __tablename__ = "leads"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # contact / property
+    source = Column(String, default="Unknown")
+    source_details = Column(String, nullable=True)
+    contact_name = Column(String, nullable=True)
+    contact_phone = Column(String, nullable=True)
+    contact_email = Column(String, nullable=True)
+    property_address = Column(String, nullable=True)
+    damage_type = Column(String, nullable=True)
+
+    # pipeline
+    status = Column(String, default=LeadStatus.NEW)
+    assigned_to = Column(String, nullable=True)
+    estimated_value = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+
+    # SLA
+    sla_hours = Column(Integer, default=24)
+    sla_stage = Column(String, default=LeadStatus.NEW)
+    sla_entered_at = Column(DateTime, default=datetime.utcnow)
+
+    # pipeline extra fields (migration may add them)
+    contacted = Column(Boolean, default=False)
+    inspection_scheduled = Column(Boolean, default=False)
+    inspection_scheduled_at = Column(DateTime, nullable=True)
+    inspection_completed = Column(Boolean, default=False)
+    inspection_completed_at = Column(DateTime, nullable=True)
+    estimate_submitted = Column(Boolean, default=False)
+    estimate_submitted_at = Column(DateTime, nullable=True)
+    awarded_comment = Column(Text, nullable=True)
+    awarded_date = Column(DateTime, nullable=True)
+    lost_comment = Column(Text, nullable=True)
+    lost_date = Column(DateTime, nullable=True)
+
+    estimates = relationship("Estimate", back_populates="lead", cascade="all, delete-orphan")
+
+class Estimate(Base):
+    __tablename__ = "estimates"
+    id = Column(Integer, primary_key=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    amount = Column(Float, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    approved = Column(Boolean, default=False)
+    approved_at = Column(DateTime, nullable=True)
+    lost = Column(Boolean, default=False)
+    lost_reason = Column(String, nullable=True)
+    details = Column(Text, nullable=True)
+
+    lead = relationship("Lead", back_populates="estimates")
+
+# ---------------------------
+# DB init + safe migration
+# ---------------------------
+def create_tables_and_migrate():
+    # create tables
+    Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    if "leads" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("leads")}
+    conn = engine.connect()
+    for col, def_sql in MIGRATION_COLUMNS.items():
+        if col not in existing_cols:
+            try:
+                conn.execute(f"ALTER TABLE leads ADD COLUMN {col} {def_sql};")
+            except Exception as e:
+                # continue on failure (SQLite quirks)
+                print("Migration add column failed", col, e)
+    conn.close()
+
+def init_db():
+    create_tables_and_migrate()
+
+# ---------------------------
+# DB helpers (CRUD)
+# ---------------------------
+def get_session():
+    return SessionLocal()
+
+def add_lead(session, **kwargs):
+    lead = Lead(
+        source=kwargs.get("source"),
+        source_details=kwargs.get("source_details"),
+        contact_name=kwargs.get("contact_name"),
+        contact_phone=kwargs.get("contact_phone"),
+        contact_email=kwargs.get("contact_email"),
+        property_address=kwargs.get("property_address"),
+        damage_type=kwargs.get("damage_type"),
+        status=LeadStatus.NEW,
+        assigned_to=kwargs.get("assigned_to"),
+        estimated_value=kwargs.get("estimated_value"),
+        notes=kwargs.get("notes"),
+        sla_hours=kwargs.get("sla_hours", 24),
+        sla_stage=LeadStatus.NEW,
+        sla_entered_at=datetime.utcnow(),
+        contacted=kwargs.get("contacted", False),
+        inspection_scheduled=kwargs.get("inspection_scheduled", False),
+        inspection_scheduled_at=kwargs.get("inspection_scheduled_at"),
+        inspection_completed=kwargs.get("inspection_completed", False),
+        inspection_completed_at=kwargs.get("inspection_completed_at"),
+        estimate_submitted=kwargs.get("estimate_submitted", False),
+        estimate_submitted_at=kwargs.get("estimate_submitted_at"),
+        awarded_comment=kwargs.get("awarded_comment"),
+        awarded_date=kwargs.get("awarded_date"),
+        lost_comment=kwargs.get("lost_comment"),
+        lost_date=kwargs.get("lost_date"),
+    )
+    session.add(lead)
+    session.commit()
+    return lead
+
+def leads_df(session):
+    return pd.read_sql(session.query(Lead).statement, session.bind)
+
+def estimates_df(session):
+    return pd.read_sql(session.query(Estimate).statement, session.bind)
+
+def create_estimate(session, lead_id, amount, details=""):
+    est = Estimate(lead_id=lead_id, amount=amount, details=details)
+    session.add(est)
+    session.commit()
+    return est
+
+def mark_estimate_sent(session, estimate_id):
+    est = session.query(Estimate).filter(Estimate.id == estimate_id).first()
+    if est:
+        est.sent_at = datetime.utcnow()
+        session.add(est); session.commit()
+    return est
+
+def mark_estimate_approved(session, estimate_id):
+    est = session.query(Estimate).filter(Estimate.id == estimate_id).first()
+    if est:
+        est.approved = True
+        est.approved_at = datetime.utcnow()
+        session.add(est)
+        lead = est.lead
+        lead.status = LeadStatus.AWARDED
+        lead.awarded_date = datetime.utcnow()
+        session.add(lead)
+        session.commit()
+    return est
+
+def mark_estimate_lost(session, estimate_id, reason="Lost"):
+    est = session.query(Estimate).filter(Estimate.id == estimate_id).first()
+    if est:
+        est.lost = True
+        est.lost_reason = reason
+        session.add(est)
+        lead = est.lead
+        lead.status = LeadStatus.LOST
+        lead.lost_date = datetime.utcnow()
+        session.add(lead)
+        session.commit()
+    return est
+
+# ---------------------------
+# Priority scoring
+# ---------------------------
+def compute_priority_for_lead_row(lead_row, weights):
+    # value normalized
+    val = float(lead_row.get("estimated_value") or 0.0)
+    baseline = weights.get("value_baseline", 5000.0)
+    value_score = min(val / baseline, 1.0)
+
+    # time left hours
+    try:
+        sla_entered = lead_row.get("sla_entered_at")
+        if pd.isna(sla_entered) or sla_entered is None:
+            time_left_h = 9999.0
+        else:
+            if isinstance(sla_entered, str):
+                sla_entered = datetime.fromisoformat(sla_entered)
+            deadline = sla_entered + timedelta(hours=int(lead_row.get("sla_hours") or 24))
+            time_left_h = max((deadline - datetime.utcnow()).total_seconds() / 3600.0, 0.0)
+    except Exception:
+        time_left_h = 9999.0
+
+    # SLA urgency 0..1
+    sla_score = max(0.0, (72.0 - min(time_left_h, 72.0)) / 72.0)
+
+    # flags
+    contacted = bool(lead_row.get("contacted"))
+    inspection_scheduled = bool(lead_row.get("inspection_scheduled"))
+    estimate_submitted = bool(lead_row.get("estimate_submitted"))
+
+    contacted_flag = 0.0 if contacted else 1.0
+    inspection_flag = 0.0 if inspection_scheduled else 1.0
+    estimate_flag = 0.0 if estimate_submitted else 1.0
+
+    urgency_component = (contacted_flag * weights.get("contacted_w", 0.6)
+                        + inspection_flag * weights.get("inspection_w", 0.5)
+                        + estimate_flag * weights.get("estimate_w", 0.5))
+    total_weight = (weights.get("value_weight", 0.5) + weights.get("sla_weight", 0.35) + weights.get("urgency_weight", 0.15))
+    if total_weight <= 0:
+        total_weight = 1.0
+
+    score = (value_score * weights.get("value_weight", 0.5)
+            + sla_score * weights.get("sla_weight", 0.35)
+            + urgency_component * weights.get("urgency_weight", 0.15)) / total_weight
+    score = max(0.0, min(score, 1.0))
+    return score, value_score, sla_score, contacted_flag, inspection_flag, estimate_flag, time_left_h
+
+# ---------------------------
+# App UI
+# ---------------------------
+st.set_page_config(page_title="Project X — CRM", layout="wide", initial_sidebar_state="expanded")
+st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
+init_db()
+st.markdown("<div class='header'>Project X — Sales & Conversion Tracker</div>", unsafe_allow_html=True)
+
+# Sidebar controls
+with st.sidebar:
+    st.header("Control")
+    page = st.radio("Go to", ["Leads / Capture", "Pipeline Board", "Analytics & SLA", "Exports"], index=0)
+    st.markdown("---")
+
+    # priority weight controls
+    if "weights" not in st.session_state:
+        st.session_state.weights = {
+            "value_weight": 0.5, "sla_weight": 0.35, "urgency_weight": 0.15,
+            "contacted_w": 0.6, "inspection_w": 0.5, "estimate_w": 0.5,
+            "value_baseline": 5000.0
+        }
+    st.markdown("### Priority weight tuning")
+    st.session_state.weights["value_weight"] = st.slider("Estimate value weight", 0.0, 1.0, float(st.session_state.weights["value_weight"]), step=0.05)
+    st.session_state.weights["sla_weight"] = st.slider("SLA urgency weight", 0.0, 1.0, float(st.session_state.weights["sla_weight"]), step=0.05)
+    st.session_state.weights["urgency_weight"] = st.slider("Flags urgency weight", 0.0, 1.0, float(st.session_state.weights["urgency_weight"]), step=0.05)
+    st.markdown("Within urgency flags:")
+    st.session_state.weights["contacted_w"] = st.slider("Not-contacted weight", 0.0, 1.0, float(st.session_state.weights["contacted_w"]), step=0.05)
+    st.session_state.weights["inspection_w"] = st.slider("Not-scheduled weight", 0.0, 1.0, float(st.session_state.weights["inspection_w"]), step=0.05)
+    st.session_state.weights["estimate_w"] = st.slider("No-estimate weight", 0.0, 1.0, float(st.session_state.weights["estimate_w"]), step=0.05)
+    st.session_state.weights["value_baseline"] = st.number_input("Value baseline", min_value=100.0, value=float(st.session_state.weights["value_baseline"]), step=100.0)
+
+    st.markdown("---")
+    if st.button("Add Demo Lead"):
+        s = get_session()
+        add_lead(s,
+                 source="Google Ads", source_details="gclid=demo",
+                 contact_name="Demo Customer", contact_phone="+15550000", contact_email="demo@example.com",
+                 property_address="100 Demo Ave", damage_type="water",
+                 assigned_to="Alex", estimated_value=4200.0, notes="Demo lead", sla_hours=24)
+        st.success("Demo lead added")
+    st.markdown(f"DB file: <small>{DB_FILE}</small>", unsafe_allow_html=True)
+
+# --- Page: Leads / Capture
+if page == "Leads / Capture":
+    st.header("📇 Lead Capture")
+    with st.form("lead_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            source = st.selectbox("Lead Source", ["Google Ads", "Organic Search", "Referral", "Phone", "Insurance", "Other"])
+            source_details = st.text_input("Source details (UTM / notes)", placeholder="utm_source=google...")
+            contact_name = st.text_input("Contact name", placeholder="John Doe")
+            contact_phone = st.text_input("Contact phone", placeholder="+1-555-0123")
+            contact_email = st.text_input("Contact email", placeholder="name@example.com")
+        with col2:
+            property_address = st.text_input("Property address", placeholder="123 Main St, City, State")
+            damage_type = st.selectbox("Damage type", ["water", "fire", "mold", "contents", "reconstruction", "other"])
+            assigned_to = st.text_input("Assigned to", placeholder="Estimator name")
+            estimated_value = st.number_input("Estimated value (USD)", min_value=0.0, value=0.0, step=50.0)
+            sla_hours = st.number_input("SLA hours (first response)", min_value=1, value=24, step=1)
+        notes = st.text_area("Notes", placeholder="Additional context...")
+        submitted = st.form_submit_button("Create Lead")
+        if submitted:
+            s = get_session()
+            lead = add_lead(
+                s,
+                source=source,
+                source_details=source_details,
+                contact_name=contact_name,
+                contact_phone=contact_phone,
+                contact_email=contact_email,
+                property_address=property_address,
+                damage_type=damage_type,
+                assigned_to=assigned_to,
+                estimated_value=float(estimated_value) if estimated_value else None,
+                notes=notes,
+                sla_hours=int(sla_hours)
+            )
+            st.success(f"Lead created (ID: {lead.id})")
+
+    st.markdown("---")
+    st.subheader("Recent leads")
+    s = get_session()
+    df = leads_df(s)
+    if df.empty:
+        st.info("No leads yet. Create one above.")
+    else:
+        st.dataframe(df.sort_values('created_at', ascending=False).head(50))
+
 # --- Page: Pipeline Board (Clean Rows layout — fully editable)
 elif page == "Pipeline Board":
     st.header("🧭 Pipeline Board — Clean Rows")
@@ -264,3 +696,86 @@ elif page == "Pipeline Board":
                                 st.error(f"Failed to create estimate: {e}")
 
                 st.markdown("---")
+
+# --- Page: Analytics & SLA
+elif page == "Analytics & SLA":
+    st.header("📈 Funnel Analytics & SLA Dashboard")
+    s = get_session()
+    df = leads_df(s)
+    if df.empty:
+        st.info("No leads to analyze. Add some leads first.")
+    else:
+        funnel = df.groupby("status").size().reindex(LeadStatus.ALL, fill_value=0).reset_index()
+        funnel.columns = ["stage", "count"]
+        st.subheader("Funnel Overview")
+        fig = px.bar(funnel, x="stage", y="count", title="Leads by Stage", text="count")
+        fig.update_layout(xaxis_title=None, yaxis_title="Number of Leads", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Summary note
+        st.markdown("### Summary")
+        total_leads = len(df)
+        awarded = len(df[df.status == LeadStatus.AWARDED])
+        lost = len(df[df.status == LeadStatus.LOST])
+        contacted_cnt = int(df.contacted.sum()) if "contacted" in df.columns else 0
+        insp_sched_cnt = int(df.inspection_scheduled.sum()) if "inspection_scheduled" in df.columns else 0
+        st.markdown(f"- Total leads: **{total_leads}**")
+        st.markdown(f"- Awarded: **{awarded}**")
+        st.markdown(f"- Lost: **{lost}**")
+        st.markdown(f"- Contacted: **{contacted_cnt}**")
+        st.markdown(f"- Inspections scheduled: **{insp_sched_cnt}**")
+
+        # Conversion by source
+        st.subheader("Conversion by Source")
+        conv = df.copy()
+        conv["awarded_flag"] = conv["status"].apply(lambda x: 1 if x == LeadStatus.AWARDED else 0)
+        conv_summary = conv.groupby("source").agg(leads=("id", "count"), awarded=("awarded_flag", "sum")).reset_index()
+        conv_summary["conversion_rate"] = (conv_summary["awarded"] / conv_summary["leads"] * 100).round(1)
+        st.dataframe(conv_summary.sort_values("leads", ascending=False))
+
+        # SLA overdue
+        st.subheader("SLA / Overdue Leads")
+        overdue_rows = []
+        for _, row in df.iterrows():
+            sla_entered_at = row["sla_entered_at"]
+            try:
+                if pd.isna(sla_entered_at):
+                    sla_entered_at = datetime.utcnow()
+                elif isinstance(sla_entered_at, str):
+                    sla_entered_at = datetime.fromisoformat(sla_entered_at)
+            except Exception:
+                sla_entered_at = datetime.utcnow()
+            sla_hours = int(row["sla_hours"]) if pd.notna(row["sla_hours"]) else 24
+            deadline = sla_entered_at + timedelta(hours=sla_hours)
+            remaining = deadline - datetime.utcnow()
+            overdue_rows.append({
+                "id": row["id"],
+                "contact": row["contact_name"],
+                "status": row["status"],
+                "sla_stage": row["sla_stage"],
+                "deadline": deadline,
+                "overdue": remaining.total_seconds() <= 0
+            })
+        df_overdue = pd.DataFrame(overdue_rows)
+        if not df_overdue.empty:
+            st.dataframe(df_overdue.sort_values("deadline"))
+        else:
+            st.info("No SLA overdue leads.")
+
+# --- Page: Exports
+elif page == "Exports":
+    st.header("📤 Export data")
+    s = get_session()
+    df_leads = leads_df(s)
+    if df_leads.empty:
+        st.info("No leads yet to export.")
+    else:
+        csv = df_leads.to_csv(index=False).encode('utf-8')
+        st.download_button("Download leads.csv", csv, file_name="leads.csv", mime="text/csv")
+        st.markdown("---")
+        st.subheader("Estimates")
+        df_est = estimates_df(s)
+        if not df_est.empty:
+            st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode('utf-8'), file_name="estimates.csv", mime="text/csv")
+
+# End of file
