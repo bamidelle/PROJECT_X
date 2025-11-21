@@ -1,13 +1,9 @@
-# project_x_full.py
+# project_x_full_fixed.py
 """
-Project X — Full single-file app
-- Lead Capture (form)
-- Pipeline Board (Clean Rows layout, fully editable)
-- Analytics & SLA dashboard
-- Exports (CSV)
-- SQLite + SQLAlchemy ORM with light in-app migration for pipeline columns
-- Priority scoring with tunable weights in sidebar
-- Styling (Roboto, dark UI, white labels, black user input text)
+Project X — Full single-file app (fixed)
+- Replaces st.datetime_input with date+time inputs
+- Ensures forms have submit buttons
+- Adds priority tuning tip and improves dropdown hover styling
 """
 
 import os
@@ -100,6 +96,16 @@ input, textarea, select {
   color: #000000 !important; /* deep black for user-entered text */
   border-radius: 8px !important;
   border: 1px solid rgba(255,255,255,0.06) !important;
+}
+
+/* try to style dropdown options hover to black where browser allows */
+select option {
+  background: #000000 !important;
+  color: #ffffff !important;
+}
+select:hover, select:focus {
+  background: #000000 !important;
+  color: #ffffff !important;
 }
 
 /* date/time pickers */
@@ -364,6 +370,7 @@ with st.sidebar:
             "value_baseline": 5000.0
         }
     st.markdown("### Priority weight tuning")
+    st.caption("Tip: increase 'SLA urgency weight' to prioritize leads close to SLA expiry; increase 'Estimate value weight' to prioritize high-value jobs.")
     st.session_state.weights["value_weight"] = st.slider("Estimate value weight", 0.0, 1.0, float(st.session_state.weights["value_weight"]), step=0.05)
     st.session_state.weights["sla_weight"] = st.slider("SLA urgency weight", 0.0, 1.0, float(st.session_state.weights["sla_weight"]), step=0.05)
     st.session_state.weights["urgency_weight"] = st.slider("Flags urgency weight", 0.0, 1.0, float(st.session_state.weights["urgency_weight"]), step=0.05)
@@ -556,7 +563,12 @@ elif page == "Pipeline Board":
                         contact_phone = st.text_input("Contact phone", value=lead.contact_phone or "", key=f"cphone_{lead.id}")
                         contact_email = st.text_input("Contact email", value=lead.contact_email or "", key=f"cemail_{lead.id}")
                         property_address = st.text_input("Property address", value=lead.property_address or "", key=f"addr_{lead.id}")
-                        damage_type = st.selectbox("Damage type", ["water","fire","mold","contents","reconstruction","other"], index=(["water","fire","mold","contents","reconstruction","other"].index(lead.damage_type) if lead.damage_type in ["water","fire","mold","contents","reconstruction","other"] else 5), key=f"damage_{lead.id}")
+                        damage_type = st.selectbox(
+                            "Damage type",
+                            ["water","fire","mold","contents","reconstruction","other"],
+                            index=(["water","fire","mold","contents","reconstruction","other"].index(lead.damage_type) if lead.damage_type in ["water","fire","mold","contents","reconstruction","other"] else 5),
+                            key=f"damage_{lead.id}"
+                        )
                     with c2:
                         assigned_to = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
                         est_val = st.number_input("Estimated value (USD)", min_value=0.0, value=float(lead.estimated_value or 0.0), step=50.0, key=f"est_{lead.id}")
@@ -572,13 +584,19 @@ elif page == "Pipeline Board":
                         contacted_choice = st.selectbox("Contacted?", ["No", "Yes"], index=1 if lead.contacted else 0, key=f"cont_{lead.id}")
                         inspection_scheduled_choice = st.selectbox("Inspection Scheduled?", ["No", "Yes"], index=1 if lead.inspection_scheduled else 0, key=f"inspsch_{lead.id}")
                         if inspection_scheduled_choice == "Yes":
+                            # use date + time inputs and combine
                             default_dt = lead.inspection_scheduled_at or datetime.utcnow()
                             if isinstance(default_dt, str):
                                 try:
                                     default_dt = datetime.fromisoformat(default_dt)
                                 except Exception:
                                     default_dt = datetime.utcnow()
-                            inspection_dt = st.datetime_input("Inspection date & time", value=default_dt, key=f"insp_dt_{lead.id}")
+                            inspection_date = st.date_input("Inspection date", value=default_dt.date(), key=f"insp_date_{lead.id}")
+                            inspection_time = st.time_input("Inspection time", value=default_dt.time(), key=f"insp_time_{lead.id}")
+                            try:
+                                inspection_dt = datetime.combine(inspection_date, inspection_time)
+                            except Exception:
+                                inspection_dt = datetime.utcnow()
                         else:
                             inspection_dt = None
                     with colf2:
@@ -590,7 +608,12 @@ elif page == "Pipeline Board":
                                     default_dt2 = datetime.fromisoformat(default_dt2)
                                 except Exception:
                                     default_dt2 = datetime.utcnow()
-                            inspection_comp_dt = st.datetime_input("Inspection completed at", value=default_dt2, key=f"insp_comp_dt_{lead.id}")
+                            inspection_comp_date = st.date_input("Inspection completed date", value=default_dt2.date(), key=f"insp_comp_date_{lead.id}")
+                            inspection_comp_time = st.time_input("Inspection completed time", value=default_dt2.time(), key=f"insp_comp_time_{lead.id}")
+                            try:
+                                inspection_comp_dt = datetime.combine(inspection_comp_date, inspection_comp_time)
+                            except Exception:
+                                inspection_comp_dt = datetime.utcnow()
                         else:
                             inspection_comp_dt = None
                         estimate_sub_choice = st.selectbox("Estimate Submitted?", ["No","Yes"], index=1 if lead.estimate_submitted else 0, key=f"estsub_{lead.id}")
@@ -777,5 +800,3 @@ elif page == "Exports":
         df_est = estimates_df(s)
         if not df_est.empty:
             st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode('utf-8'), file_name="estimates.csv", mime="text/csv")
-
-# End of file
