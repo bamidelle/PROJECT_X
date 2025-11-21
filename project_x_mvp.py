@@ -1,6 +1,6 @@
-# project_x_projectx_v1.py
+# project_x_projectx_v1_fixed.py
 """
-Project X — Complete MVP (Steps 1, 2, 3)
+Project X — Complete MVP (Steps 1, 2, 3) - Fixed
 - Step 1: Lead Capture, Pipeline Board (fully editable), Estimates
 - Step 2: SLA engine (deadlines, overdue detection, SLA stage changes)
 - Step 3: Priority scoring (predictive risk-style scoring), Analytics dashboard
@@ -8,14 +8,9 @@ Project X — Complete MVP (Steps 1, 2, 3)
 UI/UX notes:
 - Roboto Google font
 - Labels and app text are white, user-entered text is deep black
-- Dropdown hover background is black
+- Dropdown hover background is black; hovered option text is white
 - All buttons: red background with black text
-
-Run:
-pip install streamlit sqlalchemy pandas plotly
-streamlit run project_x_projectx_v1.py
 """
-
 import os
 from datetime import datetime, timedelta
 import streamlit as st
@@ -31,7 +26,7 @@ from sqlalchemy.orm import sessionmaker, relationship
 # ---------------------------
 # CONFIG
 # ---------------------------
-DB_FILE = os.getenv("PROJECT_X_DB", "project_x_projectx_v1.db")
+DB_FILE = os.getenv("PROJECT_X_DB", "project_x_projectx_v1_fixed.db")
 DATABASE_URL = f"sqlite:///{DB_FILE}"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -54,7 +49,7 @@ MIGRATION_COLUMNS = {
 
 # ---------------------------
 # CSS / UI — Roboto, dark theme, inputs black, buttons red with black text
-# Also style select hover to black background
+# Dropdown hover black + white text (works for many browsers)
 # ---------------------------
 APP_CSS = '''
 @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
@@ -81,14 +76,32 @@ input, textarea, select { background: rgba(255,255,255,0.01) !important; color: 
 input::placeholder, textarea::placeholder { color: var(--placeholder) !important; }
 input[type="datetime-local"], input[type="date"], input[type="time"] { color:#000000 !important; }
 
-/* buttons: red bg, black text */
-button.stButton > button, .stButton>button { background: var(--primary) !important; color: #000000 !important; border: 1px solid var(--primary) !important; padding:8px 12px !important; border-radius:8px !important; font-weight:600 !important; }
+/* streamlit button classes */
+button.stButton > button, .stButton>button, .css-1emrehy button, button {
+  background: var(--primary) !important;
+  color: #000000 !important;
+  border: 1px solid var(--primary) !important;
+  padding:8px 12px !important;
+  border-radius:8px !important;
+  font-weight:600 !important;
+}
 
-/* select option hover - force black background and white text for options */
-select option:hover { background: #000000 !important; color: #000000 !important; }
-/* For some browsers, the dropdown list uses -webkit-*/
-select::-ms-expand { background: transparent; }
+/* raw HTML buttons (used in quick-contact links) */
+a > button, .markdown-button { background: var(--primary) !important; color:#000000 !important; border:1px solid var(--primary) !important; padding:6px 10px !important; border-radius:6px !important; font-weight:600 !important; }
 
+/* select option hover - attempt to force black background and white text for options */
+select option:hover, option:hover {
+  background: #000000 !important;
+  color: #ffffff !important;
+}
+
+/* fallback styling for dropdown popover in some browsers */
+div[role="listbox"] > div[role="option"]:hover {
+  background: #000000 !important;
+  color: #ffffff !important;
+}
+
+/* small kv */
 .kv { color: var(--muted); font-size:13px; }
 '''
 
@@ -276,7 +289,7 @@ def compute_priority_for_lead_row(lead_row, weights):
 # ---------------------------
 # App UI
 # ---------------------------
-st.set_page_config(page_title='Project X — Full', layout='wide', initial_sidebar_state='expanded')
+st.set_page_config(page_title='Project X — Full (Fixed)', layout='wide', initial_sidebar_state='expanded')
 st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
 init_db()
 st.markdown("<div class='header'>Project X — Sales & Conversion Tracker (Full)</div>", unsafe_allow_html=True)
@@ -362,7 +375,15 @@ elif page == 'Pipeline Board':
         if not pr_df.empty:
             for _, r in pr_df.head(8).iterrows():
                 color = 'red' if r['priority_score']>=0.7 else ('orange' if r['priority_score']>=0.45 else 'white')
-                st.markdown(f"<div style='padding:8px;border-radius:8px;margin-bottom:6px;border:1px solid rgba(255,255,255,0.04);display:flex;justify-content:space-between;align-items:center;'><div><strong style='color:{color};'>#{int(r['id'])} — {r['contact_name']}</strong><span style='color:var(--muted); margin-left:8px;'>| Est: ${r['estimated_value']:,.0f}</span><span style='color:var(--muted); margin-left:8px;'>| Time left: {int(r['time_left_hours'])}h</span></div><div style="font-weight:700;color:{color};">Priority: {r['priority_score']:.2f}</div></div>", unsafe_allow_html=True)
+                html = (
+                    f"<div style='padding:8px;border-radius:8px;margin-bottom:6px;border:1px solid rgba(255,255,255,0.04);"
+                    f"display:flex;justify-content:space-between;align-items:center;'>"
+                    f"<div><strong style='color:{color};'>#{int(r['id'])} — {r['contact_name']}</strong>"
+                    f"<span style='color:var(--muted); margin-left:8px;'>| Est: ${r['estimated_value']:,.0f}</span>"
+                    f"<span style='color:var(--muted); margin-left:8px;'>| Time left: {int(r['time_left_hours'])}h</span></div>"
+                    f"<div style='font-weight:700;color:{color};'>Priority: {r['priority_score']:.2f}</div></div>"
+                )
+                st.markdown(html, unsafe_allow_html=True)
         else:
             st.info('No priority leads yet.')
         st.markdown('---')
@@ -394,12 +415,12 @@ elif page == 'Pipeline Board':
                 q1,q2,q3,q4 = st.columns([1,1,1,4])
                 phone = (lead.contact_phone or '').strip(); email=(lead.contact_email or '').strip()
                 if phone:
-                    q1.markdown(f"<a href='tel:{phone}'><button>📞 Call</button></a>", unsafe_allow_html=True)
-                    q2.markdown(f"<a href='https://wa.me/{phone.lstrip('+').replace(' ','')}' target='_blank'><button>💬 WhatsApp</button></a>", unsafe_allow_html=True)
+                    q1.markdown(f"<a href='tel:{phone}'><button class='markdown-button'>📞 Call</button></a>", unsafe_allow_html=True)
+                    q2.markdown(f"<a href='https://wa.me/{phone.lstrip('+').replace(' ','')}' target='_blank'><button class='markdown-button'>💬 WhatsApp</button></a>", unsafe_allow_html=True)
                 else:
                     q1.write(' '); q2.write(' ')
                 if email:
-                    q3.markdown(f"<a href='mailto:{email}?subject=Follow%20up'><button>✉️ Email</button></a>", unsafe_allow_html=True)
+                    q3.markdown(f"<a href='mailto:{email}?subject=Follow%20up'><button class='markdown-button'>✉️ Email</button></a>", unsafe_allow_html=True)
                 else:
                     q3.write(' ')
                 q4.write('')
@@ -418,7 +439,7 @@ elif page == 'Pipeline Board':
 
                 st.markdown('---')
 
-                # Editable form for lead
+                # Editable form for lead (each form has submit button)
                 with st.form(f'edit_lead_{lead.id}'):
                     col1,col2 = st.columns(2)
                     with col1:
@@ -597,5 +618,3 @@ elif page == 'Exports':
         st.download_button('Download estimates.csv', df_est.to_csv(index=False).encode('utf-8'), file_name='estimates.csv', mime='text/csv')
 
 # End of file
-
-# I will populate the full updated code in the next update_textdoc call.
