@@ -31,6 +31,17 @@ Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 
+st.markdown("""
+<style>
+/* Input cursor color */
+input, select, textarea {
+    caret-color: black !important;
+    color: black !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 # Migration-safe column defs (SQLite-friendly)
 MIGRATION_COLUMNS = {
     "contacted": "INTEGER DEFAULT 0",
@@ -490,7 +501,7 @@ if page == "Leads / Capture":
                 qualified=True if qualified_choice == "Yes" else False
             )
             st.success(f"Lead created (ID: {lead.id})")
-            st.experimental_rerun()
+            rerun()
 
     st.markdown("---")
     st.subheader("Recent leads")
@@ -716,7 +727,7 @@ elif page == "Pipeline Board":
                             s.add(lead)
                             s.commit()
                             st.success(f"Lead #{lead.id} saved.")
-                            st.experimental_rerun()
+                            rerun()
                         except Exception as e:
                             st.error(f"Error saving lead: {e}")
 
@@ -743,7 +754,7 @@ elif page == "Pipeline Board":
                             try:
                                 mark_estimate_sent(s, first_est.id)
                                 st.success("Marked as sent.")
-                                st.experimental_rerun()
+                                rerun()
                             except Exception as e:
                                 st.error(e)
                     with eb:
@@ -751,7 +762,7 @@ elif page == "Pipeline Board":
                             try:
                                 mark_estimate_approved(s, first_est.id)
                                 st.success("Approved and lead moved to Awarded.")
-                                st.experimental_rerun()
+                                rerun()
                             except Exception as e:
                                 st.error(e)
                     with ec:
@@ -759,7 +770,7 @@ elif page == "Pipeline Board":
                             try:
                                 mark_estimate_lost(s, first_est.id, reason="Lost to competitor")
                                 st.success("Marked lost and lead moved to Lost.")
-                                st.experimental_rerun()
+                                rerun()
                             except Exception as e:
                                 st.error(e)
                 else:
@@ -772,7 +783,7 @@ elif page == "Pipeline Board":
                             try:
                                 create_estimate(s, lead.id, float(amt), details=det)
                                 st.success("Estimate created.")
-                                st.experimental_rerun()
+                                rerun()
                             except Exception as e:
                                 st.error(e)
 
