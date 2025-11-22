@@ -1,18 +1,13 @@
-# project_x_mvp_fixed_final.py
+# assan1_app.py
 """
-Project X — Full single-file app (fixed)
-- SQLite + SQLAlchemy ORM
-- Safe in-app migrations for new pipeline columns
-- Lead Capture (qualified yes/no), Pipeline Board (editable rows),
-  Estimates, Awarded invoice upload, SLA engine, Priority scoring,
-  Analytics (funnel + qualified vs unqualified breakdowns)
-- Styling: Roboto font, white labels, black user-entered text,
-  select hover black, main submission buttons red with black text,
-  quick contact buttons colored (WhatsApp green, Call blue)
-Notes:
-- This variant avoids calling st.experimental_rerun() directly to prevent
-  AttributeError on older/newer Streamlit builds. Streamlit automatically reruns
-  after form submissions / button presses — the UI will reflect DB commits.
+Assan / Project X — Main app file (fixed)
+- Single-file Streamlit app with SQLite + SQLAlchemy
+- No experimental_rerun calls (avoids AttributeError)
+- All datetime inputs use date_input + time_input (combine_date_time)
+- Money values shown in green
+- Main form submit buttons styled red with black text
+- Quick contact buttons: Call (blue), WhatsApp (green), Email (transparent)
+- Priority scoring, SLA countdown, Analytics (funnel + qualified breakdown)
 """
 
 import os
@@ -30,7 +25,7 @@ from sqlalchemy.orm import sessionmaker, relationship
 # ---------------------------
 # CONFIG
 # ---------------------------
-DB_FILE = os.getenv("PROJECT_X_DB", "project_x_mvp_fixed.db")
+DB_FILE = os.getenv("PROJECT_X_DB", "assan1_app.db")
 DATABASE_URL = f"sqlite:///{DB_FILE}"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -50,7 +45,7 @@ MIGRATION_COLUMNS = {
     "awarded_invoice": "TEXT",
     "lost_comment": "TEXT",
     "lost_date": "TEXT",
-    "qualified": "INTEGER DEFAULT 0",
+    "qualified": "INTEGER DEFAULT 0"
 }
 
 # ---------------------------
@@ -58,10 +53,8 @@ MIGRATION_COLUMNS = {
 # ---------------------------
 APP_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
-
 :root{
   --bg:#0b0f13;
-  --card:#0f1720;
   --muted:#93a0ad;
   --white:#ffffff;
   --placeholder:#3a3a3a;
@@ -72,56 +65,37 @@ APP_CSS = """
   --wa-green:#25D366;
 }
 
-/* base */
+/* Base */
 body, .stApp {
   background: linear-gradient(180deg, #06070a 0%, #0b0f13 100%);
   color: var(--white);
   font-family: 'Roboto', sans-serif;
 }
 
-/* sidebar */
+/* Sidebar */
 section[data-testid="stSidebar"] {
   background: transparent !important;
   padding: 18px;
   border-right: 1px solid rgba(255,255,255,0.03);
 }
 
-/* header */
-.header {
-  padding: 12px;
-  border-radius: 8px;
-  color: var(--white);
-  font-weight: 600;
-  font-size: 18px;
-}
+/* Header */
+.header { padding: 12px; color: var(--white); font-weight:600; font-size:18px; }
 
-/* form titles and control labels */
-h1, h2, h3, label, .css-1rs6os { color: var(--white) !important; }
+/* Form labels, control labels */
+label, .css-1rs6os { color: var(--white) !important; }
 
-/* make labels and general text white */
-div, p, span, label {
-  color: var(--white) !important;
-}
-
-/* placeholder color */
-input::placeholder, textarea::placeholder {
-  color: var(--placeholder) !important;
-}
-
-/* form inputs: transparent background, deep black typed text */
+/* Inputs: black typed text */
 input, textarea, select {
   background: rgba(255,255,255,0.01) !important;
-  color: #000000 !important; /* deep black for user-entered text */
+  color: #000000 !important;
   border-radius: 8px !important;
   border: 1px solid rgba(255,255,255,0.06) !important;
 }
+input::placeholder, textarea::placeholder { color: var(--placeholder) !important; }
+input[type="date"], input[type="time"] { color: #000000 !important; }
 
-/* date/time pickers */
-input[type="datetime-local"], input[type="date"], input[type="time"] {
-  color: #000000 !important;
-}
-
-/* default Streamlit button style (keeps prior look for non-main buttons) */
+/* Default streamlit button style kept */
 button.stButton > button, .stButton>button {
   background: transparent !important;
   color: var(--white) !important;
@@ -131,39 +105,25 @@ button.stButton > button, .stButton>button {
   font-weight: 600 !important;
 }
 
-/* MAIN submission buttons (forms) - style to red with black text */
-button.stButton[data-testid="stFormSubmitButton"] > button,
-div[data-testid="stFormSubmitButton"] > button {
+/* Main form submission buttons -> red background with black text */
+div[data-testid="stFormSubmitButton"] > button, button.stButton[data-testid="stFormSubmitButton"] > button {
   background: var(--primary-red) !important;
   color: #000000 !important;
   border: 1px solid var(--primary-red) !important;
 }
 
 /* Money values (green) */
-.money { color: var(--money-green) !important; font-weight:700 !important; }
+.money { color: var(--money-green); font-weight:700; }
 
-/* Time left (blue) */
-.time-left { color: var(--call-blue) !important; font-weight:700 !important; }
-
-/* Select option hover: best-effort force */
+/* Select option hover - best effort (browser dependent) */
 select option:hover { background: #000000 !important; color: #ffffff !important; }
 
-/* quick-contact inline override (used in HTML buttons) */
-.quick-call { background: var(--call-blue); color: #000 !important; }
-.quick-wa { background: var(--wa-green); color: #000 !important; }
+/* Quick contact overrides for inline use */
+.quick-call { background: var(--call-blue); color:#000; border-radius:8px; padding:6px 10px; border:none; }
+.quick-wa { background: var(--wa-green); color:#000; border-radius:8px; padding:6px 10px; border:none; }
 
-/* small kv */
-.kv { color: var(--white); font-size:13px; }
-
-/* make links not underlined for our inline buttons */
-a { text-decoration: none; }
-"""
-
-# Also add caret-color CSS so cursor is black for inputs (user previously added)
-CARET_CSS = """
-<style>
-input, select, textarea { caret-color: black !important; }
-</style>
+/* small help text */
+.kv { color: var(--muted); font-size:13px; }
 """
 
 # ---------------------------
@@ -184,7 +144,6 @@ class Lead(Base):
     id = Column(Integer, primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # contact / property
     source = Column(String, default="Unknown")
     source_details = Column(String, nullable=True)
     contact_name = Column(String, nullable=True)
@@ -193,18 +152,15 @@ class Lead(Base):
     property_address = Column(String, nullable=True)
     damage_type = Column(String, nullable=True)
 
-    # pipeline
     status = Column(String, default=LeadStatus.NEW)
     assigned_to = Column(String, nullable=True)
     estimated_value = Column(Float, nullable=True)
     notes = Column(Text, nullable=True)
 
-    # SLA
     sla_hours = Column(Integer, default=24)
     sla_stage = Column(String, default=LeadStatus.NEW)
     sla_entered_at = Column(DateTime, default=datetime.utcnow)
 
-    # pipeline extra fields
     contacted = Column(Boolean, default=False)
     inspection_scheduled = Column(Boolean, default=False)
     inspection_scheduled_at = Column(DateTime, nullable=True)
@@ -352,13 +308,14 @@ def mark_estimate_lost(session, estimate_id, reason="Lost"):
     return est
 
 # ---------------------------
-# Priority scoring (weights in sidebar)
+# Priority scoring
 # ---------------------------
 def compute_priority_for_lead_row(lead_row, weights):
     val = float(lead_row.get("estimated_value") or 0.0)
     baseline = weights.get("value_baseline", 5000.0)
     value_score = min(val / baseline, 1.0)
 
+    # time left hours
     try:
         sla_entered = lead_row.get("sla_entered_at")
         if pd.isna(sla_entered) or sla_entered is None:
@@ -417,11 +374,10 @@ def save_uploaded_file(uploaded_file, lead_id):
 # ---------------------------
 # STREAMLIT UI
 # ---------------------------
-st.set_page_config(page_title="Project X — MVP Fixed", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Assan — CRM", layout="wide", initial_sidebar_state="expanded")
 st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
-st.markdown(CARET_CSS, unsafe_allow_html=True)
 init_db()
-st.markdown("<div class='header'>Project X — Sales & Conversion Tracker (Fixed)</div>", unsafe_allow_html=True)
+st.markdown("<div class='header'>Assan — Sales & Conversion Tracker</div>", unsafe_allow_html=True)
 
 # Sidebar: control + priority tuning
 with st.sidebar:
@@ -443,27 +399,18 @@ with st.sidebar:
     st.session_state.weights["inspection_w"] = st.slider("Not-scheduled weight", 0.0, 1.0, float(st.session_state.weights["inspection_w"]), step=0.05)
     st.session_state.weights["estimate_w"] = st.slider("No-estimate weight", 0.0, 1.0, float(st.session_state.weights["estimate_w"]), step=0.05)
     st.session_state.weights["value_baseline"] = st.number_input("Value baseline", min_value=100.0, value=float(st.session_state.weights["value_baseline"]), step=100.0)
-    st.markdown('<small class="kv">Tip: Increase SLA weight to prioritise leads nearing deadline; increase value weight to prioritise larger jobs.</small>', unsafe_allow_html=True)
+    st.markdown('<small class="kv">Tip: Increase SLA weight to prioritise leads nearing deadline; increase value weight to prioritise larger jobs. (Live countdown updates when app reruns / user interacts)</small>', unsafe_allow_html=True)
 
     st.markdown("---")
     if st.button("Add Demo Lead"):
         s = get_session()
-        add_lead(
-            s,
-            source="Google Ads",
-            source_details="gclid=demo",
-            contact_name="Demo Customer",
-            contact_phone="+15550000",
-            contact_email="demo@example.com",
-            property_address="100 Demo Ave",
-            damage_type="water",
-            assigned_to="Alex",
-            estimated_value=None,
-            notes="Demo lead",
-            sla_hours=24,
-            qualified=True
-        )
+        add_lead(s,
+                 source="Google Ads", source_details="gclid=demo",
+                 contact_name="Demo Customer", contact_phone="+15550000", contact_email="demo@example.com",
+                 property_address="100 Demo Ave", damage_type="water",
+                 assigned_to="Alex", estimated_value=None, notes="Demo lead", sla_hours=24, qualified=True)
         st.success("Demo lead added")
+
     st.markdown(f"DB file: <small>{DB_FILE}</small>", unsafe_allow_html=True)
 
 # --- Page: Leads / Capture
@@ -481,6 +428,7 @@ if page == "Leads / Capture":
             property_address = st.text_input("Property address", placeholder="123 Main St, City, State")
             damage_type = st.selectbox("Damage type", ["water", "fire", "mold", "contents", "reconstruction", "other"])
             assigned_to = st.text_input("Assigned to", placeholder="Estimator name")
+            # replaced field
             qualified_choice = st.selectbox("Is the Lead Qualified?", ["No", "Yes"], index=0)
             sla_hours = st.number_input("SLA hours (first response)", min_value=1, value=24, step=1)
         notes = st.text_area("Notes", placeholder="Additional context...")
@@ -502,6 +450,7 @@ if page == "Leads / Capture":
                 qualified=True if qualified_choice == "Yes" else False
             )
             st.success(f"Lead created (ID: {lead.id})")
+            # no st.experimental_rerun() - avoid attribute errors
 
     st.markdown("---")
     st.subheader("Recent leads")
@@ -512,12 +461,11 @@ if page == "Leads / Capture":
     else:
         st.dataframe(df.sort_values("created_at", ascending=False).head(50))
 
-# --- Page: Pipeline Board (rows layout)
+# --- Page: Pipeline Board
 elif page == "Pipeline Board":
     st.header("🧭 Pipeline Board — Rows (editable)")
     s = get_session()
     leads = s.query(Lead).order_by(Lead.created_at.desc()).all()
-
     if not leads:
         st.info("No leads yet. Create one from Lead Capture.")
     else:
@@ -547,12 +495,14 @@ elif page == "Pipeline Board":
                     color = "red"
                 elif score >= 0.45:
                     color = "orange"
+                # estimated value inline green style to guarantee green display
+                est_html = f"<span class='money' style='color:var(--money-green);'>${r['estimated_value']:,.0f}</span>"
                 html = f"""
                 <div style='padding:10px;border-radius:10px;margin-bottom:8px;border:1px solid rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:space-between;'>
                   <div>
                     <strong style='color:{color};'>#{int(r['id'])} — {r['contact_name'] or 'No name'}</strong>
-                    <span style='color:var(--muted); margin-left:8px;'>| Est: <span class="money">${r['estimated_value']:,.0f}</span></span>
-                    <span style='color:var(--muted); margin-left:8px;'>| Time left: <span class="time-left">{int(r['time_left_hours'])}h</span></span>
+                    <span style='color:var(--muted); margin-left:8px;'>| Est: {est_html}</span>
+                    <span style='color:var(--muted); margin-left:8px;'>| Time left: <span style="color:#2563eb;font-weight:700;">{int(r['time_left_hours'])}h</span></span>
                   </div>
                   <div style='font-weight:700;color:{color};'>Priority: {r['priority_score']:.2f}</div>
                 </div>
@@ -564,7 +514,7 @@ elif page == "Pipeline Board":
 
         # Render rows
         for lead in leads:
-            est_val_display = f"<span class='money'>${lead.estimated_value:,.0f}</span>" if lead.estimated_value else "$0"
+            est_val_display = f"<span class='money' style='color:var(--money-green)'>${lead.estimated_value:,.0f}</span>" if lead.estimated_value else "$0"
             card_title = f"#{lead.id} — {lead.contact_name or 'No name'} — {lead.damage_type or 'No damage type'} — {est_val_display}"
             with st.expander(card_title, expanded=False):
                 colA, colB = st.columns([3, 1])
@@ -582,19 +532,21 @@ elif page == "Pipeline Board":
                         score = 0.0; time_left = 9999
                     priority_label = ("High" if score >= 0.7 else "Medium" if score >= 0.45 else "Normal")
                     priority_color = "red" if score >= 0.7 else ("orange" if score >= 0.45 else "white")
-                    st.markdown(f"<div style='text-align:right'><strong style='color:{priority_color};'>{priority_label}</strong><br><span class='time-left'>Time left: {int(time_left)}h</span><br><span style='color:var(--muted);'>Score: {score:.2f}</span></div>", unsafe_allow_html=True)
+                    # Time-left display in blue (static until next rerun)
+                    time_left_display = f"{int(time_left)}h" if time_left < 9999 else "—"
+                    st.markdown(f"<div style='text-align:right'><strong style='color:{priority_color};'>{priority_label}</strong><br><span style='color:#2563eb;font-weight:700;'>Time left: {time_left_display}</span></div>", unsafe_allow_html=True)
 
                 st.markdown("---")
 
-                # Quick contact (inline buttons)
+                # Quick contact (inline colored buttons)
                 qc1, qc2, qc3, qc4 = st.columns([1,1,1,4])
                 phone = (lead.contact_phone or "").strip()
                 email = (lead.contact_email or "").strip()
                 if phone:
-                    qc1.markdown(f"<a href='tel:{phone}'><button style='background:var(--call-blue); color:#000; border-radius:8px; padding:6px 10px; border: none;'>📞 Call</button></a>", unsafe_allow_html=True)
+                    qc1.markdown(f"<a href='tel:{phone}'><button class='quick-call'>📞 Call</button></a>", unsafe_allow_html=True)
                     wa_number = phone.lstrip("+").replace(" ", "")
                     wa_link = f"https://wa.me/{wa_number}?text=Hi%2C%20we%20are%20following%20up%20on%20your%20restoration%20request."
-                    qc2.markdown(f"<a href='{wa_link}' target='_blank'><button style='background:var(--wa-green); color:#000; border-radius:8px; padding:6px 10px; border: none;'>💬 WhatsApp</button></a>", unsafe_allow_html=True)
+                    qc2.markdown(f"<a href='{wa_link}' target='_blank'><button class='quick-wa'>💬 WhatsApp</button></a>", unsafe_allow_html=True)
                 else:
                     qc1.write(" "); qc2.write(" ")
                 if email:
@@ -603,7 +555,7 @@ elif page == "Pipeline Board":
                     qc3.write(" ")
                 qc4.write("")
 
-                # SLA
+                # SLA countdown / overdue
                 entered = lead.sla_entered_at or lead.created_at
                 if isinstance(entered, str):
                     try:
@@ -615,17 +567,16 @@ elif page == "Pipeline Board":
                 if remaining.total_seconds() <= 0:
                     st.markdown(f"❗ <strong style='color:red;'>SLA OVERDUE</strong> — was due {deadline.strftime('%Y-%m-%d %H:%M')}", unsafe_allow_html=True)
                 else:
-                    # show hours/min/sec style
-                    hrs = int(remaining.total_seconds() // 3600)
-                    mins = int((remaining.total_seconds() % 3600) // 60)
-                    secs = int(remaining.total_seconds() % 60)
-                    st.markdown(f"⏳ <span class='time-left'>SLA remaining: {hrs}h {mins}m {secs}s</span> (due {deadline.strftime('%Y-%m-%d %H:%M')})", unsafe_allow_html=True)
+                    # show nice hh:mm:ss approximate (updates on rerun/user interaction)
+                    hours = int(remaining.total_seconds() // 3600)
+                    minutes = int((remaining.total_seconds() % 3600) // 60)
+                    seconds = int(remaining.total_seconds() % 60)
+                    st.markdown(f"⏳ SLA remaining: <span style='color:#2563eb;font-weight:700;'>{hours:02d}:{minutes:02d}:{seconds:02d}</span> (due {deadline.strftime('%Y-%m-%d %H:%M')})", unsafe_allow_html=True)
 
                 st.markdown("---")
 
-                # Editable form (single lead)
-                form_key = f"edit_lead_{lead.id}"
-                with st.form(form_key):
+                # Editable form for this lead
+                with st.form(f"edit_lead_{lead.id}"):
                     c1, c2 = st.columns(2)
                     with c1:
                         contact_name = st.text_input("Contact name", value=lead.contact_name or "", key=f"cname_{lead.id}")
@@ -647,7 +598,7 @@ elif page == "Pipeline Board":
                         contacted_choice = st.selectbox("Contacted?", ["No", "Yes"], index=1 if lead.contacted else 0, key=f"cont_{lead.id}")
                         inspection_scheduled_choice = st.selectbox("Inspection Scheduled?", ["No", "Yes"], index=1 if lead.inspection_scheduled else 0, key=f"inspsch_{lead.id}")
                         if inspection_scheduled_choice == "Yes":
-                            default_date = lead.inspection_scheduled_at.date() if lead.inspection_scheduled_at else datetime.utcnow().date()
+                            default_date = (lead.inspection_scheduled_at.date() if lead.inspection_scheduled_at else datetime.utcnow().date())
                             default_time = (lead.inspection_scheduled_at.time() if lead.inspection_scheduled_at else dtime(hour=9, minute=0))
                             insp_date = st.date_input("Inspection date", value=default_date, key=f"insp_date_{lead.id}")
                             insp_time = st.time_input("Inspection time", value=default_time, key=f"insp_time_{lead.id}")
@@ -657,7 +608,7 @@ elif page == "Pipeline Board":
                     with f2:
                         inspection_completed_choice = st.selectbox("Inspection Completed?", ["No","Yes"], index=1 if lead.inspection_completed else 0, key=f"inspcomp_{lead.id}")
                         if inspection_completed_choice == "Yes":
-                            default_date2 = lead.inspection_completed_at.date() if lead.inspection_completed_at else datetime.utcnow().date()
+                            default_date2 = (lead.inspection_completed_at.date() if lead.inspection_completed_at else datetime.utcnow().date())
                             default_time2 = (lead.inspection_completed_at.time() if lead.inspection_completed_at else dtime(hour=9, minute=0))
                             comp_date = st.date_input("Inspection completed date", value=default_date2, key=f"insp_comp_date_{lead.id}")
                             comp_time = st.time_input("Inspection completed time", value=default_time2, key=f"insp_comp_time_{lead.id}")
@@ -666,9 +617,9 @@ elif page == "Pipeline Board":
                             inspection_comp_dt = None
                         estimate_sub_choice = st.selectbox("Estimate Submitted?", ["No","Yes"], index=1 if lead.estimate_submitted else 0, key=f"estsub_{lead.id}")
                         if estimate_sub_choice == "Yes":
-                            est_submitted_date = st.date_input("Estimate submitted date", value=(lead.estimate_submitted_at.date() if lead.estimate_submitted_at else datetime.utcnow().date()), key=f"est_sub_date_{lead.id}")
-                            est_submitted_time = st.time_input("Estimate submitted time", value=(lead.estimate_submitted_at.time() if lead.estimate_submitted_at else dtime(hour=9, minute=0)), key=f"est_sub_time_{lead.id}")
-                            est_submitted_dt = combine_date_time(est_submitted_date, est_submitted_time)
+                            est_sub_date = st.date_input("Estimate submitted date", value=(lead.estimate_submitted_at.date() if lead.estimate_submitted_at else datetime.utcnow().date()), key=f"est_sub_date_{lead.id}")
+                            est_sub_time = st.time_input("Estimate submitted time", value=(lead.estimate_submitted_at.time() if lead.estimate_submitted_at else dtime(hour=9, minute=0)), key=f"est_sub_time_{lead.id}")
+                            est_submitted_dt = combine_date_time(est_sub_date, est_sub_time)
                             est_amount_input = est_val_widget
                         else:
                             est_submitted_dt = None
@@ -676,14 +627,14 @@ elif page == "Pipeline Board":
                     with f3:
                         awarded_choice = st.selectbox("Awarded?", ["No","Yes"], index=1 if lead.status == LeadStatus.AWARDED else 0, key=f"awarded_choice_{lead.id}")
                         awarded_comment = st.text_input("Awarded comment (optional)", value=lead.awarded_comment or "", key=f"awcom_{lead.id}")
-                        awarded_date_val = lead.awarded_date.date() if lead.awarded_date else datetime.utcnow().date()
+                        awarded_date_val = (lead.awarded_date.date() if lead.awarded_date else datetime.utcnow().date())
                         awarded_date = st.date_input("Awarded date (optional)", value=awarded_date_val, key=f"awdate_{lead.id}")
                         awarded_invoice_upload = None
                         if awarded_choice == "Yes":
                             awarded_invoice_upload = st.file_uploader("Upload invoice (optional)", type=["pdf","jpg","png","jpeg"], key=f"inv_{lead.id}")
                         lost_choice = st.selectbox("Lost?", ["No","Yes"], index=1 if lead.status == LeadStatus.LOST else 0, key=f"lost_choice_{lead.id}")
                         lost_comment = st.text_input("Lost comment (optional)", value=lead.lost_comment or "", key=f"lostcom_{lead.id}")
-                        lost_date_val = lead.lost_date.date() if lead.lost_date else datetime.utcnow().date()
+                        lost_date_val = (lead.lost_date.date() if lead.lost_date else datetime.utcnow().date())
                         lost_date = st.date_input("Lost date (optional)", value=lost_date_val, key=f"lostdate_{lead.id}")
 
                     save = st.form_submit_button("Save Lead")
@@ -695,8 +646,8 @@ elif page == "Pipeline Board":
                             lead.property_address = property_address.strip() or None
                             lead.damage_type = damage_type
                             lead.assigned_to = assigned_to.strip() or None
-                            # estimated value: only set if estimate_submitted True or est_amount_input provided
-                            if estimate_sub_choice == "Yes" and est_amount_input:
+                            # estimated value: only set if estimate_submitted True
+                            if estimate_sub_choice == "Yes" and est_amount_input is not None:
                                 lead.estimated_value = float(est_amount_input)
                             lead.notes = notes.strip() or None
                             lead.sla_hours = int(sla_hours)
@@ -718,19 +669,23 @@ elif page == "Pipeline Board":
                                     saved_path = save_uploaded_file(awarded_invoice_upload, lead.id)
                                     if saved_path:
                                         lead.awarded_invoice = saved_path
+                            else:
+                                # if user sets No, preserve existing awarded info unless explicitly cleared
+                                pass
                             # lost handling
                             if lost_choice == "Yes":
                                 lead.status = LeadStatus.LOST
                                 lead.lost_comment = lost_comment.strip() or None
                                 lead.lost_date = datetime.combine(lost_date, datetime.min.time()) if lost_date else None
-                            # status change if not set by awarded/lost
+                            # status change if not awarded/lost
                             if status_choice != lead.status and status_choice not in (LeadStatus.AWARDED, LeadStatus.LOST):
                                 lead.status = status_choice
                                 lead.sla_stage = status_choice
                                 lead.sla_entered_at = datetime.utcnow()
-                            s.add(lead)
-                            s.commit()
+                            s.add(lead); s.commit()
                             st.success(f"Lead #{lead.id} saved.")
+                            # we intentionally do not call st.experimental_rerun() (some envs lack it)
+                            # users can refresh manually or interact with UI to reflect updates in charts
                         except Exception as e:
                             st.error(f"Error saving lead: {e}")
 
@@ -800,7 +755,7 @@ elif page == "Analytics & SLA":
         funnel.columns = ["stage", "count"]
         st.subheader("Funnel Overview")
         colors = ["#2563eb", "#ffd2b3", "#22c55e", "#facc15", "#fb923c", "#000000", "#a3a3a3"]
-        fig = px.bar(funnel, x="stage", y="count", title="Leads by Stage", text="count", color="stage", color_discrete_sequence=colors[: len(funnel)])
+        fig = px.bar(funnel, x="stage", y="count", title="Leads by Stage", text="count", color="stage", color_discrete_sequence=colors[:len(funnel)])
         fig.update_layout(xaxis_title=None, yaxis_title="Number of Leads", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -823,10 +778,14 @@ elif page == "Analytics & SLA":
         conv_summary["conversion_rate"] = (conv_summary["awarded"] / conv_summary["leads"] * 100).round(1)
         st.dataframe(conv_summary.sort_values("leads", ascending=False))
 
+        # Qualified vs Unqualified charts
         st.subheader("Qualified vs Unqualified — Time Breakdown")
         ts = df.copy()
         ts["created_date"] = pd.to_datetime(ts["created_at"]).dt.date
-        ts["qualified_flag"] = ts["qualified"].apply(lambda x: 1 if x else 0) if "qualified" in ts.columns else 0
+        if "qualified" in ts.columns:
+            ts["qualified_flag"] = ts["qualified"].apply(lambda x: 1 if x else 0)
+        else:
+            ts["qualified_flag"] = 0
         choice = st.selectbox("Range", ["Daily", "Weekly", "Monthly", "Yearly"])
         if choice == "Daily":
             agg = ts.groupby("created_date").agg(total=("id", "count"), qualified=("qualified_flag", "sum")).reset_index()
@@ -855,6 +814,7 @@ elif page == "Analytics & SLA":
         else:
             st.info("No data for selected range.")
 
+        # SLA overdue
         st.subheader("SLA / Overdue Leads")
         overdue_rows = []
         for _, row in df.iterrows():
@@ -896,6 +856,7 @@ elif page == "Exports":
     df_est = estimates_df(s)
     if not df_est.empty:
         st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode("utf-8"), file_name="estimates.csv", mime="text/csv")
+
     st.markdown("---")
     st.write("Uploaded invoices (saved locally):")
     inv_dir = os.path.join(os.getcwd(), "uploaded_invoices")
