@@ -1,20 +1,25 @@
-# project_x_mvp_fixed_full.py
+# project_x_mvp_fixed_final.py
 """
-Project X — Full single-file app (Fixed)
-- Lead Capture (qualified yes/no)
-- Pipeline Board (editable rows), Estimates, Awarded invoice upload
-- SLA engine, Priority scoring, Analytics, Exports
-- Styling: Roboto, white labels, black user-entered text,
+Project X — Full single-file app (fixed)
+- SQLite + SQLAlchemy ORM
+- Safe in-app migrations for new pipeline columns
+- Lead Capture (qualified yes/no), Pipeline Board (editable rows),
+  Estimates, Awarded invoice upload, SLA engine, Priority scoring,
+  Analytics (funnel + qualified vs unqualified breakdowns)
+- Styling: Roboto font, white labels, black user-entered text,
   select hover black, main submission buttons red with black text,
   quick contact buttons colored (WhatsApp green, Call blue)
+Notes:
+- This variant avoids calling st.experimental_rerun() directly to prevent
+  AttributeError on older/newer Streamlit builds. Streamlit automatically reruns
+  after form submissions / button presses — the UI will reflect DB commits.
 """
 
 import os
-from datetime import datetime, timedelta, time as dtime, date as dt_date
+from datetime import datetime, timedelta, time as dtime
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from io import BytesIO
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, inspect
@@ -25,22 +30,11 @@ from sqlalchemy.orm import sessionmaker, relationship
 # ---------------------------
 # CONFIG
 # ---------------------------
-DB_FILE = os.getenv("PROJECT_X_DB", "project_x_mvp_fixed_full.db")
+DB_FILE = os.getenv("PROJECT_X_DB", "project_x_mvp_fixed.db")
 DATABASE_URL = f"sqlite:///{DB_FILE}"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
-
-st.markdown("""
-<style>
-/* Input cursor color */
-input, select, textarea {
-    caret-color: black !important;
-    color: black !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
 
 # Migration-safe column defs (SQLite-friendly)
 MIGRATION_COLUMNS = {
@@ -123,11 +117,11 @@ input, textarea, select {
 }
 
 /* date/time pickers */
-input[type="date"], input[type="time"] {
+input[type="datetime-local"], input[type="date"], input[type="time"] {
   color: #000000 !important;
 }
 
-/* default Streamlit button style (keeps prior look) */
+/* default Streamlit button style (keeps prior look for non-main buttons) */
 button.stButton > button, .stButton>button {
   background: transparent !important;
   color: var(--white) !important;
@@ -139,33 +133,37 @@ button.stButton > button, .stButton>button {
 
 /* MAIN submission buttons (forms) - style to red with black text */
 button.stButton[data-testid="stFormSubmitButton"] > button,
-div[data-testid="stFormSubmitButton"] > button,
-.stButton>button[data-testid="stFormSubmitButton"] {
+div[data-testid="stFormSubmitButton"] > button {
   background: var(--primary-red) !important;
   color: #000000 !important;
   border: 1px solid var(--primary-red) !important;
 }
 
-/* Quick-contact button inline styles will set colors; fallback class */
-.btn-call { background: var(--call-blue); color: #000; border-radius:8px; padding:6px 10px; border:none; }
-.btn-wa   { background: var(--wa-green); color: #000; border-radius:8px; padding:6px 10px; border:none; }
-
 /* Money values (green) */
-.money { color: var(--money-green); font-weight:700; }
+.money { color: var(--money-green) !important; font-weight:700 !important; }
 
-/* Select option hover (browser-dependent) */
+/* Time left (blue) */
+.time-left { color: var(--call-blue) !important; font-weight:700 !important; }
+
+/* Select option hover: best-effort force */
 select option:hover { background: #000000 !important; color: #ffffff !important; }
+
+/* quick-contact inline override (used in HTML buttons) */
+.quick-call { background: var(--call-blue); color: #000 !important; }
+.quick-wa { background: var(--wa-green); color: #000 !important; }
 
 /* small kv */
 .kv { color: var(--white); font-size:13px; }
 
-/* Funnel palette helpers */
-.funnel-color-0 { color: #2563eb } /* blue */
-.funnel-color-1 { color: #ffd2b3 } /* peach */
-.funnel-color-2 { color: #22c55e } /* green */
-.funnel-color-3 { color: #facc15 } /* yellow */
-.funnel-color-4 { color: #fb923c } /* orange */
-.funnel-color-5 { color: #000000 } /* black */
+/* make links not underlined for our inline buttons */
+a { text-decoration: none; }
+"""
+
+# Also add caret-color CSS so cursor is black for inputs (user previously added)
+CARET_CSS = """
+<style>
+input, select, textarea { caret-color: black !important; }
+</style>
 """
 
 # ---------------------------
@@ -186,6 +184,7 @@ class Lead(Base):
     id = Column(Integer, primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # contact / property
     source = Column(String, default="Unknown")
     source_details = Column(String, nullable=True)
     contact_name = Column(String, nullable=True)
@@ -194,15 +193,18 @@ class Lead(Base):
     property_address = Column(String, nullable=True)
     damage_type = Column(String, nullable=True)
 
+    # pipeline
     status = Column(String, default=LeadStatus.NEW)
     assigned_to = Column(String, nullable=True)
     estimated_value = Column(Float, nullable=True)
     notes = Column(Text, nullable=True)
 
+    # SLA
     sla_hours = Column(Integer, default=24)
     sla_stage = Column(String, default=LeadStatus.NEW)
     sla_entered_at = Column(DateTime, default=datetime.utcnow)
 
+    # pipeline extra fields
     contacted = Column(Boolean, default=False)
     inspection_scheduled = Column(Boolean, default=False)
     inspection_scheduled_at = Column(DateTime, nullable=True)
@@ -249,7 +251,6 @@ def create_tables_and_migrate():
             try:
                 conn.execute(f"ALTER TABLE leads ADD COLUMN {col} {def_sql};")
             except Exception as e:
-                # ignore migration failures (SQLite quirks)
                 print("Migration add column failed:", col, e)
     conn.close()
 
@@ -306,7 +307,7 @@ def create_estimate(session, lead_id, amount, details=""):
     est = Estimate(lead_id=lead_id, amount=amount, details=details, created_at=datetime.utcnow())
     session.add(est)
     session.commit()
-    # update lead immediately
+    # update lead
     lead = session.query(Lead).filter(Lead.id == lead_id).first()
     if lead:
         lead.estimated_value = float(amount)
@@ -351,7 +352,7 @@ def mark_estimate_lost(session, estimate_id, reason="Lost"):
     return est
 
 # ---------------------------
-# Priority scoring
+# Priority scoring (weights in sidebar)
 # ---------------------------
 def compute_priority_for_lead_row(lead_row, weights):
     val = float(lead_row.get("estimated_value") or 0.0)
@@ -393,7 +394,7 @@ def compute_priority_for_lead_row(lead_row, weights):
 # ---------------------------
 # Utilities
 # ---------------------------
-def combine_date_time(d: dt_date, t: dtime):
+def combine_date_time(d: datetime.date, t: dtime):
     if d is None and t is None:
         return None
     if d is None:
@@ -418,6 +419,7 @@ def save_uploaded_file(uploaded_file, lead_id):
 # ---------------------------
 st.set_page_config(page_title="Project X — MVP Fixed", layout="wide", initial_sidebar_state="expanded")
 st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
+st.markdown(CARET_CSS, unsafe_allow_html=True)
 init_db()
 st.markdown("<div class='header'>Project X — Sales & Conversion Tracker (Fixed)</div>", unsafe_allow_html=True)
 
@@ -462,7 +464,6 @@ with st.sidebar:
             qualified=True
         )
         st.success("Demo lead added")
-
     st.markdown(f"DB file: <small>{DB_FILE}</small>", unsafe_allow_html=True)
 
 # --- Page: Leads / Capture
@@ -501,7 +502,6 @@ if page == "Leads / Capture":
                 qualified=True if qualified_choice == "Yes" else False
             )
             st.success(f"Lead created (ID: {lead.id})")
-            rerun()
 
     st.markdown("---")
     st.subheader("Recent leads")
@@ -512,7 +512,7 @@ if page == "Leads / Capture":
     else:
         st.dataframe(df.sort_values("created_at", ascending=False).head(50))
 
-# --- Page: Pipeline Board
+# --- Page: Pipeline Board (rows layout)
 elif page == "Pipeline Board":
     st.header("🧭 Pipeline Board — Rows (editable)")
     s = get_session()
@@ -524,7 +524,7 @@ elif page == "Pipeline Board":
         df = leads_df(s)
         weights = st.session_state.weights
 
-        # Priority summary top
+        # Priority summary
         priority_list = []
         for _, row in df.iterrows():
             score, _, _, _, _, _, time_left = compute_priority_for_lead_row(row, weights)
@@ -552,7 +552,7 @@ elif page == "Pipeline Board":
                   <div>
                     <strong style='color:{color};'>#{int(r['id'])} — {r['contact_name'] or 'No name'}</strong>
                     <span style='color:var(--muted); margin-left:8px;'>| Est: <span class="money">${r['estimated_value']:,.0f}</span></span>
-                    <span style='color:var(--muted); margin-left:8px;'>| Time left: {int(r['time_left_hours'])}h</span>
+                    <span style='color:var(--muted); margin-left:8px;'>| Time left: <span class="time-left">{int(r['time_left_hours'])}h</span></span>
                   </div>
                   <div style='font-weight:700;color:{color};'>Priority: {r['priority_score']:.2f}</div>
                 </div>
@@ -573,8 +573,8 @@ elif page == "Pipeline Board":
                     st.markdown(f"**Address:** {lead.property_address or '—'}")
                     st.markdown(f"**Notes:** {lead.notes or '—'}")
                     st.markdown(f"**Created:** {lead.created_at}")
-                    st.markdown(f"**Qualified:** {'Yes' if lead.qualified else 'No'}")
                 with colB:
+                    # compute single priority
                     try:
                         single_row = df[df["id"] == lead.id].iloc[0].to_dict()
                         score, _, _, _, _, _, time_left = compute_priority_for_lead_row(single_row, weights)
@@ -582,23 +582,23 @@ elif page == "Pipeline Board":
                         score = 0.0; time_left = 9999
                     priority_label = ("High" if score >= 0.7 else "Medium" if score >= 0.45 else "Normal")
                     priority_color = "red" if score >= 0.7 else ("orange" if score >= 0.45 else "white")
-                    st.markdown(f"<div style='text-align:right'><strong style='color:{priority_color};'>{priority_label}</strong><br><span style='color:var(--muted);'>Score: {score:.2f}</span></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='text-align:right'><strong style='color:{priority_color};'>{priority_label}</strong><br><span class='time-left'>Time left: {int(time_left)}h</span><br><span style='color:var(--muted);'>Score: {score:.2f}</span></div>", unsafe_allow_html=True)
 
                 st.markdown("---")
 
-                # Quick contact (Call blue, WhatsApp green, Email default)
+                # Quick contact (inline buttons)
                 qc1, qc2, qc3, qc4 = st.columns([1,1,1,4])
                 phone = (lead.contact_phone or "").strip()
                 email = (lead.contact_email or "").strip()
                 if phone:
-                    qc1.markdown(f"<a href='tel:{phone}'><button class='btn-call'>📞 Call</button></a>", unsafe_allow_html=True)
+                    qc1.markdown(f"<a href='tel:{phone}'><button style='background:var(--call-blue); color:#000; border-radius:8px; padding:6px 10px; border: none;'>📞 Call</button></a>", unsafe_allow_html=True)
                     wa_number = phone.lstrip("+").replace(" ", "")
                     wa_link = f"https://wa.me/{wa_number}?text=Hi%2C%20we%20are%20following%20up%20on%20your%20restoration%20request."
-                    qc2.markdown(f"<a href='{wa_link}' target='_blank'><button class='btn-wa'>💬 WhatsApp</button></a>", unsafe_allow_html=True)
+                    qc2.markdown(f"<a href='{wa_link}' target='_blank'><button style='background:var(--wa-green); color:#000; border-radius:8px; padding:6px 10px; border: none;'>💬 WhatsApp</button></a>", unsafe_allow_html=True)
                 else:
                     qc1.write(" "); qc2.write(" ")
                 if email:
-                    qc3.markdown(f"<a href='mailto:{email}?subject=Follow%20up'><button>✉️ Email</button></a>", unsafe_allow_html=True)
+                    qc3.markdown(f"<a href='mailto:{email}?subject=Follow%20up'><button style='background:transparent; color:var(--white); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:6px 10px;'>✉️ Email</button></a>", unsafe_allow_html=True)
                 else:
                     qc3.write(" ")
                 qc4.write("")
@@ -615,7 +615,11 @@ elif page == "Pipeline Board":
                 if remaining.total_seconds() <= 0:
                     st.markdown(f"❗ <strong style='color:red;'>SLA OVERDUE</strong> — was due {deadline.strftime('%Y-%m-%d %H:%M')}", unsafe_allow_html=True)
                 else:
-                    st.markdown(f"⏳ SLA remaining: {str(remaining).split('.')[0]} (due {deadline.strftime('%Y-%m-%d %H:%M')})")
+                    # show hours/min/sec style
+                    hrs = int(remaining.total_seconds() // 3600)
+                    mins = int((remaining.total_seconds() % 3600) // 60)
+                    secs = int(remaining.total_seconds() % 60)
+                    st.markdown(f"⏳ <span class='time-left'>SLA remaining: {hrs}h {mins}m {secs}s</span> (due {deadline.strftime('%Y-%m-%d %H:%M')})", unsafe_allow_html=True)
 
                 st.markdown("---")
 
@@ -631,9 +635,7 @@ elif page == "Pipeline Board":
                         damage_type = st.selectbox("Damage type", ["water","fire","mold","contents","reconstruction","other"], index=(["water","fire","mold","contents","reconstruction","other"].index(lead.damage_type) if lead.damage_type in ["water","fire","mold","contents","reconstruction","other"] else 5), key=f"damage_{lead.id}")
                     with c2:
                         assigned_to = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
-                        est_val_display = lead.estimated_value or 0.0
-                        # show estimated value widget (it will only be applied when Estimate Submitted=Yes)
-                        est_val_widget = st.number_input("Estimated value (USD) — (applies if Estimate Submitted = Yes)", min_value=0.0, value=float(est_val_display), step=50.0, key=f"est_{lead.id}")
+                        est_val_widget = st.number_input("Estimated value (USD) — (only used if Estimate Submitted = Yes)", min_value=0.0, value=float(lead.estimated_value or 0.0), step=50.0, key=f"est_{lead.id}")
                         sla_hours = st.number_input("SLA hours", min_value=1, value=int(lead.sla_hours or 24), step=1, key=f"sla_{lead.id}")
                         status_choice = st.selectbox("Status", options=LeadStatus.ALL, index=LeadStatus.ALL.index(lead.status), key=f"status_{lead.id}")
 
@@ -693,11 +695,9 @@ elif page == "Pipeline Board":
                             lead.property_address = property_address.strip() or None
                             lead.damage_type = damage_type
                             lead.assigned_to = assigned_to.strip() or None
-                            if estimate_sub_choice == "Yes" and est_amount_input is not None:
+                            # estimated value: only set if estimate_submitted True or est_amount_input provided
+                            if estimate_sub_choice == "Yes" and est_amount_input:
                                 lead.estimated_value = float(est_amount_input)
-                                lead.estimate_submitted = True
-                                lead.estimate_submitted_at = est_submitted_dt or datetime.utcnow()
-                                lead.status = LeadStatus.ESTIMATE_SUBMITTED
                             lead.notes = notes.strip() or None
                             lead.sla_hours = int(sla_hours)
                             lead.contacted = True if contacted_choice == "Yes" else False
@@ -705,6 +705,11 @@ elif page == "Pipeline Board":
                             lead.inspection_scheduled_at = inspection_dt
                             lead.inspection_completed = True if inspection_completed_choice == "Yes" else False
                             lead.inspection_completed_at = inspection_comp_dt
+                            lead.estimate_submitted = True if estimate_sub_choice == "Yes" else False
+                            lead.estimate_submitted_at = est_submitted_dt
+                            if est_amount_input:
+                                lead.estimated_value = float(est_amount_input)
+                            # awarded handling
                             if awarded_choice == "Yes":
                                 lead.status = LeadStatus.AWARDED
                                 lead.awarded_comment = awarded_comment.strip() or None
@@ -713,13 +718,12 @@ elif page == "Pipeline Board":
                                     saved_path = save_uploaded_file(awarded_invoice_upload, lead.id)
                                     if saved_path:
                                         lead.awarded_invoice = saved_path
-                            else:
-                                # don't remove previous awarded values automatically
-                                pass
+                            # lost handling
                             if lost_choice == "Yes":
                                 lead.status = LeadStatus.LOST
                                 lead.lost_comment = lost_comment.strip() or None
                                 lead.lost_date = datetime.combine(lost_date, datetime.min.time()) if lost_date else None
+                            # status change if not set by awarded/lost
                             if status_choice != lead.status and status_choice not in (LeadStatus.AWARDED, LeadStatus.LOST):
                                 lead.status = status_choice
                                 lead.sla_stage = status_choice
@@ -727,11 +731,10 @@ elif page == "Pipeline Board":
                             s.add(lead)
                             s.commit()
                             st.success(f"Lead #{lead.id} saved.")
-                            rerun()
                         except Exception as e:
                             st.error(f"Error saving lead: {e}")
 
-                # Estimates section
+                # Estimates section (outside form)
                 st.markdown("**Estimates**")
                 ests = s.query(Estimate).filter(Estimate.lead_id == lead.id).order_by(Estimate.created_at.desc()).all()
                 if ests:
@@ -754,7 +757,6 @@ elif page == "Pipeline Board":
                             try:
                                 mark_estimate_sent(s, first_est.id)
                                 st.success("Marked as sent.")
-                                rerun()
                             except Exception as e:
                                 st.error(e)
                     with eb:
@@ -762,7 +764,6 @@ elif page == "Pipeline Board":
                             try:
                                 mark_estimate_approved(s, first_est.id)
                                 st.success("Approved and lead moved to Awarded.")
-                                rerun()
                             except Exception as e:
                                 st.error(e)
                     with ec:
@@ -770,7 +771,6 @@ elif page == "Pipeline Board":
                             try:
                                 mark_estimate_lost(s, first_est.id, reason="Lost to competitor")
                                 st.success("Marked lost and lead moved to Lost.")
-                                rerun()
                             except Exception as e:
                                 st.error(e)
                 else:
@@ -783,7 +783,6 @@ elif page == "Pipeline Board":
                             try:
                                 create_estimate(s, lead.id, float(amt), details=det)
                                 st.success("Estimate created.")
-                                rerun()
                             except Exception as e:
                                 st.error(e)
 
@@ -909,5 +908,3 @@ elif page == "Exports":
             st.write("No uploaded invoices yet.")
     else:
         st.write("No uploaded invoices yet.")
-
-# End of file
