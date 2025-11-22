@@ -83,7 +83,7 @@ section[data-testid="stSidebar"] {
 .header { padding: 12px; color: var(--white); font-weight:600; font-size:18px; }
 
 /* Form labels, control labels */
-label, .css-1rs6os { color: var(--white) !important; }
+label, .css-1rs6os { color: var(--blue) !important; }
 
 /* Inputs: black typed text */
 input, textarea, select {
