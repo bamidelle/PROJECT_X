@@ -555,193 +555,190 @@ elif page == "Pipeline Board":
                     qc3.write(" ")
                 qc4.write("")
 
-                # SLA countdown / overdue
-                entered = lead.sla_entered_at or lead.created_at
-                if isinstance(entered, str):
-                    try:
-                        entered = datetime.fromisoformat(entered)
-                    except Exception:
-                        entered = datetime.utcnow()
-                deadline = entered + timedelta(hours=(lead.sla_hours or 24))
-                remaining = deadline - datetime.utcnow()
-                if remaining.total_seconds() <= 0:
-                    st.markdown(f"❗ <strong style='color:red;'>SLA OVERDUE</strong> — was due {deadline.strftime('%Y-%m-%d %H:%M')}", unsafe_allow_html=True)
-                else:
-                    # show nice hh:mm:ss approximate (updates on rerun/user interaction)
-                    hours = int(remaining.total_seconds() // 3600)
-                    minutes = int((remaining.total_seconds() % 3600) // 60)
-                    seconds = int(remaining.total_seconds() % 60)
-                    st.markdown(f"⏳ SLA remaining: <span style='color:#2563eb;font-weight:700;'>{hours:02d}:{minutes:02d}:{seconds:02d}</span> (due {deadline.strftime('%Y-%m-%d %H:%M')})", unsafe_allow_html=True)
+                import os
+from datetime import datetime, timedelta, date as ddate, time as dtime
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+from models import Lead, Estimate, LeadStatus, init_db, get_session, leads_df, estimates_df, add_lead, create_estimate, mark_estimate_sent, mark_estimate_approved, mark_estimate_lost
+from utils import combine_date_time, save_uploaded_file, compute_priority_for_lead_row, predict_lead_probability
+import joblib
 
-                st.markdown("---")
+# --- Streamlit Page Setup
+st.set_page_config(page_title="Assan — CRM", layout="wide", initial_sidebar_state="expanded")
+st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
+init_db()
+st.markdown("<div class='header'>Assan — Sales & Conversion Tracker</div>", unsafe_allow_html=True)
 
-                # Editable form for this lead
-                with st.form(f"edit_lead_{lead.id}"):
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        contact_name = st.text_input("Contact name", value=lead.contact_name or "", key=f"cname_{lead.id}")
-                        contact_phone = st.text_input("Contact phone", value=lead.contact_phone or "", key=f"cphone_{lead.id}")
-                        contact_email = st.text_input("Contact email", value=lead.contact_email or "", key=f"cemail_{lead.id}")
-                        property_address = st.text_input("Property address", value=lead.property_address or "", key=f"addr_{lead.id}")
-                        damage_type = st.selectbox("Damage type", ["water","fire","mold","contents","reconstruction","other"], index=(["water","fire","mold","contents","reconstruction","other"].index(lead.damage_type) if lead.damage_type in ["water","fire","mold","contents","reconstruction","other"] else 5), key=f"damage_{lead.id}")
-                    with c2:
-                        assigned_to = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
-                        est_val_widget = st.number_input("Estimated value (USD) — (only used if Estimate Submitted = Yes)", min_value=0.0, value=float(lead.estimated_value or 0.0), step=50.0, key=f"est_{lead.id}")
-                        sla_hours = st.number_input("SLA hours", min_value=1, value=int(lead.sla_hours or 24), step=1, key=f"sla_{lead.id}")
-                        status_choice = st.selectbox("Status", options=LeadStatus.ALL, index=LeadStatus.ALL.index(lead.status), key=f"status_{lead.id}")
+# --- Sidebar: Control + Priority tuning
+with st.sidebar:
+    st.header("Control")
+    page = st.radio("Go to", ["Leads / Capture", "Pipeline Board", "Analytics & SLA", "Exports"], index=0)
+    st.markdown("---")
 
-                    notes = st.text_area("Notes", value=lead.notes or "", key=f"notes_{lead.id}")
+    if "weights" not in st.session_state:
+        st.session_state.weights = {
+            "value_weight": 0.5, "sla_weight": 0.35, "urgency_weight": 0.15,
+            "contacted_w": 0.6, "inspection_w": 0.5, "estimate_w": 0.5, "value_baseline": 5000.0
+        }
+    st.markdown("### Priority weight tuning")
+    st.session_state.weights["value_weight"] = st.slider("Estimate value weight", 0.0, 1.0, float(st.session_state.weights["value_weight"]), step=0.05)
+    st.session_state.weights["sla_weight"] = st.slider("SLA urgency weight", 0.0, 1.0, float(st.session_state.weights["sla_weight"]), step=0.05)
+    st.session_state.weights["urgency_weight"] = st.slider("Flags urgency weight", 0.0, 1.0, float(st.session_state.weights["urgency_weight"]), step=0.05)
+    st.markdown("Within urgency flags:")
+    st.session_state.weights["contacted_w"] = st.slider("Not-contacted weight", 0.0, 1.0, float(st.session_state.weights["contacted_w"]), step=0.05)
+    st.session_state.weights["inspection_w"] = st.slider("Not-scheduled weight", 0.0, 1.0, float(st.session_state.weights["inspection_w"]), step=0.05)
+    st.session_state.weights["estimate_w"] = st.slider("No-estimate weight", 0.0, 1.0, float(st.session_state.weights["estimate_w"]), step=0.05)
+    st.session_state.weights["value_baseline"] = st.number_input("Value baseline", min_value=100.0, value=float(st.session_state.weights["value_baseline"]), step=100.0)
+    st.markdown('<small class="kv">Tip: Increase SLA weight to prioritise leads nearing deadline; increase value weight to prioritise larger jobs.</small>', unsafe_allow_html=True)
 
-                    st.markdown("**Pipeline Steps**")
-                    f1, f2, f3 = st.columns(3)
-                    with f1:
-                        contacted_choice = st.selectbox("Contacted?", ["No", "Yes"], index=1 if lead.contacted else 0, key=f"cont_{lead.id}")
-                        inspection_scheduled_choice = st.selectbox("Inspection Scheduled?", ["No", "Yes"], index=1 if lead.inspection_scheduled else 0, key=f"inspsch_{lead.id}")
-                        if inspection_scheduled_choice == "Yes":
-                            default_date = (lead.inspection_scheduled_at.date() if lead.inspection_scheduled_at else datetime.utcnow().date())
-                            default_time = (lead.inspection_scheduled_at.time() if lead.inspection_scheduled_at else dtime(hour=9, minute=0))
-                            insp_date = st.date_input("Inspection date", value=default_date, key=f"insp_date_{lead.id}")
-                            insp_time = st.time_input("Inspection time", value=default_time, key=f"insp_time_{lead.id}")
-                            inspection_dt = combine_date_time(insp_date, insp_time)
-                        else:
-                            inspection_dt = None
-                    with f2:
-                        inspection_completed_choice = st.selectbox("Inspection Completed?", ["No","Yes"], index=1 if lead.inspection_completed else 0, key=f"inspcomp_{lead.id}")
-                        if inspection_completed_choice == "Yes":
-                            default_date2 = (lead.inspection_completed_at.date() if lead.inspection_completed_at else datetime.utcnow().date())
-                            default_time2 = (lead.inspection_completed_at.time() if lead.inspection_completed_at else dtime(hour=9, minute=0))
-                            comp_date = st.date_input("Inspection completed date", value=default_date2, key=f"insp_comp_date_{lead.id}")
-                            comp_time = st.time_input("Inspection completed time", value=default_time2, key=f"insp_comp_time_{lead.id}")
-                            inspection_comp_dt = combine_date_time(comp_date, comp_time)
-                        else:
-                            inspection_comp_dt = None
-                        estimate_sub_choice = st.selectbox("Estimate Submitted?", ["No","Yes"], index=1 if lead.estimate_submitted else 0, key=f"estsub_{lead.id}")
-                        if estimate_sub_choice == "Yes":
-                            est_sub_date = st.date_input("Estimate submitted date", value=(lead.estimate_submitted_at.date() if lead.estimate_submitted_at else datetime.utcnow().date()), key=f"est_sub_date_{lead.id}")
-                            est_sub_time = st.time_input("Estimate submitted time", value=(lead.estimate_submitted_at.time() if lead.estimate_submitted_at else dtime(hour=9, minute=0)), key=f"est_sub_time_{lead.id}")
-                            est_submitted_dt = combine_date_time(est_sub_date, est_sub_time)
-                            est_amount_input = est_val_widget
-                        else:
-                            est_submitted_dt = None
-                            est_amount_input = None
-                    with f3:
-                        awarded_choice = st.selectbox("Awarded?", ["No","Yes"], index=1 if lead.status == LeadStatus.AWARDED else 0, key=f"awarded_choice_{lead.id}")
-                        awarded_comment = st.text_input("Awarded comment (optional)", value=lead.awarded_comment or "", key=f"awcom_{lead.id}")
-                        awarded_date_val = (lead.awarded_date.date() if lead.awarded_date else datetime.utcnow().date())
-                        awarded_date = st.date_input("Awarded date (optional)", value=awarded_date_val, key=f"awdate_{lead.id}")
-                        awarded_invoice_upload = None
-                        if awarded_choice == "Yes":
-                            awarded_invoice_upload = st.file_uploader("Upload invoice (optional)", type=["pdf","jpg","png","jpeg"], key=f"inv_{lead.id}")
-                        lost_choice = st.selectbox("Lost?", ["No","Yes"], index=1 if lead.status == LeadStatus.LOST else 0, key=f"lost_choice_{lead.id}")
-                        lost_comment = st.text_input("Lost comment (optional)", value=lead.lost_comment or "", key=f"lostcom_{lead.id}")
-                        lost_date_val = (lead.lost_date.date() if lead.lost_date else datetime.utcnow().date())
-                        lost_date = st.date_input("Lost date (optional)", value=lost_date_val, key=f"lostdate_{lead.id}")
+    st.markdown("---")
+    if st.button("Add Demo Lead"):
+        s = get_session()
+        add_lead(s,
+                 source="Google Ads", source_details="gclid=demo",
+                 contact_name="Demo Customer", contact_phone="+15550000", contact_email="demo@example.com",
+                 property_address="100 Demo Ave", damage_type="water",
+                 assigned_to="Alex", estimated_value=None, notes="Demo lead", sla_hours=24, qualified=True)
+        st.success("Demo lead added")
 
-                    save = st.form_submit_button("Save Lead")
-                    if save:
-                        try:
-                            lead.contact_name = contact_name.strip() or None
-                            lead.contact_phone = contact_phone.strip() or None
-                            lead.contact_email = contact_email.strip() or None
-                            lead.property_address = property_address.strip() or None
-                            lead.damage_type = damage_type
-                            lead.assigned_to = assigned_to.strip() or None
-                            # estimated value: only set if estimate_submitted True
-                            if estimate_sub_choice == "Yes" and est_amount_input is not None:
-                                lead.estimated_value = float(est_amount_input)
-                            lead.notes = notes.strip() or None
-                            lead.sla_hours = int(sla_hours)
-                            lead.contacted = True if contacted_choice == "Yes" else False
-                            lead.inspection_scheduled = True if inspection_scheduled_choice == "Yes" else False
-                            lead.inspection_scheduled_at = inspection_dt
-                            lead.inspection_completed = True if inspection_completed_choice == "Yes" else False
-                            lead.inspection_completed_at = inspection_comp_dt
-                            lead.estimate_submitted = True if estimate_sub_choice == "Yes" else False
-                            lead.estimate_submitted_at = est_submitted_dt
-                            if est_amount_input:
-                                lead.estimated_value = float(est_amount_input)
-                            # awarded handling
-                            if awarded_choice == "Yes":
-                                lead.status = LeadStatus.AWARDED
-                                lead.awarded_comment = awarded_comment.strip() or None
-                                lead.awarded_date = datetime.combine(awarded_date, datetime.min.time()) if awarded_date else None
-                                if awarded_invoice_upload is not None:
-                                    saved_path = save_uploaded_file(awarded_invoice_upload, lead.id)
-                                    if saved_path:
-                                        lead.awarded_invoice = saved_path
-                            else:
-                                # if user sets No, preserve existing awarded info unless explicitly cleared
-                                pass
-                            # lost handling
-                            if lost_choice == "Yes":
-                                lead.status = LeadStatus.LOST
-                                lead.lost_comment = lost_comment.strip() or None
-                                lead.lost_date = datetime.combine(lost_date, datetime.min.time()) if lost_date else None
-                            # status change if not awarded/lost
-                            if status_choice != lead.status and status_choice not in (LeadStatus.AWARDED, LeadStatus.LOST):
-                                lead.status = status_choice
-                                lead.sla_stage = status_choice
-                                lead.sla_entered_at = datetime.utcnow()
-                            s.add(lead); s.commit()
-                            st.success(f"Lead #{lead.id} saved.")
-                            # we intentionally do not call st.experimental_rerun() (some envs lack it)
-                            # users can refresh manually or interact with UI to reflect updates in charts
-                        except Exception as e:
-                            st.error(f"Error saving lead: {e}")
+    st.markdown(f"DB file: <small>{DB_FILE}</small>", unsafe_allow_html=True)
 
-                # Estimates section (outside form)
-                st.markdown("**Estimates**")
-                ests = s.query(Estimate).filter(Estimate.lead_id == lead.id).order_by(Estimate.created_at.desc()).all()
-                if ests:
-                    est_rows = []
-                    for e in ests:
-                        est_rows.append({
-                            "id": e.id,
-                            "amount": e.amount,
-                            "sent_at": e.sent_at,
-                            "approved": e.approved,
-                            "lost": e.lost,
-                            "lost_reason": e.lost_reason,
-                            "created_at": e.created_at
-                        })
-                    st.dataframe(pd.DataFrame(est_rows))
-                    first_est = ests[0]
-                    ea, eb, ec = st.columns(3)
-                    with ea:
-                        if st.button(f"Mark Sent (#{first_est.id})", key=f"send_{lead.id}_{first_est.id}"):
-                            try:
-                                mark_estimate_sent(s, first_est.id)
-                                st.success("Marked as sent.")
-                            except Exception as e:
-                                st.error(e)
-                    with eb:
-                        if st.button(f"Mark Approved (#{first_est.id})", key=f"app_{lead.id}_{first_est.id}"):
-                            try:
-                                mark_estimate_approved(s, first_est.id)
-                                st.success("Approved and lead moved to Awarded.")
-                            except Exception as e:
-                                st.error(e)
-                    with ec:
-                        if st.button(f"Mark Lost (#{first_est.id})", key=f"lost_{lead.id}_{first_est.id}"):
-                            try:
-                                mark_estimate_lost(s, first_est.id, reason="Lost to competitor")
-                                st.success("Marked lost and lead moved to Lost.")
-                            except Exception as e:
-                                st.error(e)
-                else:
-                    st.write("No estimates yet.")
-                    with st.form(f"create_est_{lead.id}", clear_on_submit=True):
-                        amt = st.number_input("Estimate amount (USD)", min_value=0.0, value=lead.estimated_value or 0.0, step=50.0, key=f"new_est_amt_{lead.id}")
-                        det = st.text_area("Estimate details (optional)", key=f"new_est_det_{lead.id}")
-                        create_btn = st.form_submit_button("Create Estimate")
-                        if create_btn:
-                            try:
-                                create_estimate(s, lead.id, float(amt), details=det)
-                                st.success("Estimate created.")
-                            except Exception as e:
-                                st.error(e)
+# --- Page: Leads / Capture
+if page == "Leads / Capture":
+    st.header("📇 Lead Capture")
+    with st.form("lead_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            source = st.selectbox("Lead Source", ["Google Ads", "Organic Search", "Referral", "Phone", "Insurance", "Other"])
+            source_details = st.text_input("Source details (UTM / notes)", placeholder="utm_source=google...")
+            contact_name = st.text_input("Contact name", placeholder="John Doe")
+            contact_phone = st.text_input("Contact phone", placeholder="+1-555-0123")
+            contact_email = st.text_input("Contact email", placeholder="name@example.com")
+        with col2:
+            property_address = st.text_input("Property address", placeholder="123 Main St, City, State")
+            damage_type = st.selectbox("Damage type", ["water", "fire", "mold", "contents", "reconstruction", "other"])
+            assigned_to = st.text_input("Assigned to", placeholder="Estimator name")
+            qualified_choice = st.selectbox("Is the Lead Qualified?", ["No", "Yes"], index=0)
+            sla_hours = st.number_input("SLA hours (first response)", min_value=1, value=24, step=1)
+        notes = st.text_area("Notes", placeholder="Additional context...")
+        submitted = st.form_submit_button("Create Lead")
+        if submitted:
+            s = get_session()
+            lead = add_lead(
+                s,
+                source=source,
+                source_details=source_details,
+                contact_name=contact_name,
+                contact_phone=contact_phone,
+                contact_email=contact_email,
+                property_address=property_address,
+                damage_type=damage_type,
+                assigned_to=assigned_to,
+                notes=notes,
+                sla_hours=int(sla_hours),
+                qualified=True if qualified_choice == "Yes" else False
+            )
+            st.success(f"Lead created (ID: {lead.id})")
+    st.markdown("---")
+    s = get_session()
+    df = leads_df(s)
+    if df.empty:
+        st.info("No leads yet. Create one above.")
+    else:
+        st.dataframe(df.sort_values("created_at", ascending=False).head(50))
 
-                st.markdown("---")
+# --- Page: Pipeline Board
+elif page == "Pipeline Board":
+    st.header("🧭 Pipeline Board — Rows (editable)")
+    s = get_session()
+    leads = s.query(Lead).order_by(Lead.created_at.desc()).all()
+    if not leads:
+        st.info("No leads yet. Create one from Lead Capture.")
+    else:
+        df = leads_df(s)
+        weights = st.session_state.weights
+
+        # Load ML model if exists
+        try:
+            lead_model = joblib.load('lead_conversion_model.pkl')
+        except:
+            lead_model = None
+
+        # Priority list with SLA & conversion probability
+        priority_list = []
+        for _, row in df.iterrows():
+            score, _, _, _, _, _, time_left = compute_priority_for_lead_row(row, weights)
+            # SLA remaining
+            sla_entered = row.get("sla_entered_at") or row.get("created_at")
+            if isinstance(sla_entered, str):
+                try: sla_entered = datetime.fromisoformat(sla_entered)
+                except: sla_entered = datetime.utcnow()
+            deadline = sla_entered + timedelta(hours=int(row.get("sla_hours") or 24))
+            remaining = deadline - datetime.utcnow()
+            overdue = remaining.total_seconds() <= 0
+            # Predicted conversion
+            prob = None
+            if lead_model is not None:
+                try: prob = predict_lead_probability(lead_model, row)
+                except: prob = None
+            priority_list.append({
+                "id": int(row["id"]),
+                "contact_name": row.get("contact_name") or "",
+                "estimated_value": float(row.get("estimated_value") or 0.0),
+                "time_left_hours": float(remaining.total_seconds() / 3600.0),
+                "priority_score": score,
+                "status": row.get("status"),
+                "sla_overdue": overdue,
+                "sla_deadline": deadline,
+                "conversion_prob": prob
+            })
+        pr_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
+
+        st.subheader("Priority Leads (Top 8)")
+        if not pr_df.empty:
+            for _, r in pr_df.head(8).iterrows():
+                score = r["priority_score"]
+                color = "#ffffff"
+                if score >= 0.7: color = "red"
+                elif score >= 0.45: color = "orange"
+                est_html = f"<span class='money' style='color:var(--money-green);'>${r['estimated_value']:,.0f}</span>"
+                sla_html = f"❗ <strong style='color:red;'>OVERDUE (was due {r['sla_deadline'].strftime('%Y-%m-%d %H:%M')})</strong>" if r["sla_overdue"] else f"⏳ SLA remaining: <span style='color:#2563eb;font-weight:700;'>{int(r['time_left_hours']):02d}:{int(r['time_left_hours']*60%60):02d}</span> (due {r['sla_deadline'].strftime('%Y-%m-%d %H:%M')})"
+                conv_html = f"<br><small>Predicted conversion probability: <strong>{r['conversion_prob']*100:.1f}%</strong></small>" if r["conversion_prob"] is not None else ""
+                html = f"""
+                <div style='padding:10px;border-radius:10px;margin-bottom:8px;border:1px solid rgba(255,255,255,0.04);display:flex;flex-direction:column;'>
+                  <div><strong style='color:{color};'>#{int(r['id'])} — {r['contact_name']}</strong> | Est: {est_html} | Priority: {score:.2f}</div>
+                  <div style='margin-top:4px;'>{sla_html}{conv_html}</div>
+                </div>
+                """
+                st.markdown(html, unsafe_allow_html=True)
+
+        # Render individual lead cards (SLA + form + estimates)
+        for lead in leads:
+            est_val_display = f"<span class='money' style='color:var(--money-green)'>${lead.estimated_value:,.0f}</span>" if lead.estimated_value else "$0"
+            card_title = f"#{lead.id} — {lead.contact_name or 'No name'} — {lead.damage_type or 'No damage type'} — {est_val_display}"
+            with st.expander(card_title, expanded=False):
+                colA, colB = st.columns([3,1])
+                with colA:
+                    st.markdown(f"**Source:** {lead.source or '—'}  &nbsp;&nbsp; **Assigned:** {lead.assigned_to or '—'}")
+                    st.markdown(f"**Address:** {lead.property_address or '—'}")
+                    st.markdown(f"**Notes:** {lead.notes or '—'}")
+                    st.markdown(f"**Created:** {lead.created_at}")
+                with colB:
+                    # SLA + predicted conversion
+                    entered = lead.sla_entered_at or lead.created_at
+                    if isinstance(entered, str):
+                        try: entered = datetime.fromisoformat(entered)
+                        except: entered = datetime.utcnow()
+                    deadline = entered + timedelta(hours=(lead.sla_hours or 24))
+                    remaining = deadline - datetime.utcnow()
+                    sla_html = f"❗ <strong style='color:red;'>SLA OVERDUE</strong> — was due {deadline.strftime('%Y-%m-%d %H:%M')}" if remaining.total_seconds() <= 0 else f"⏳ SLA remaining: <span style='color:#2563eb;font-weight:700;'>{int(remaining.total_seconds()//3600):02d}:{int((remaining.total_seconds()%3600)//60):02d}</span> (due {deadline.strftime('%Y-%m-%d %H:%M')})"
+                    prob = None
+                    if lead_model is not None:
+                        try: lead_row = df[df["id"]==lead.id].iloc[0].to_dict(); prob = predict_lead_probability(lead_model, lead_row)
+                        except: prob = None
+                    conv_html = f"<br><small>Predicted conversion probability: <strong>{prob*100:.1f}%</strong></small>" if prob is not None else ""
+                    st.markdown(f"<div style='text-align:right'>{sla_html}{conv_html}</div>", unsafe_allow_html=True)
 
 # --- Page: Analytics & SLA
 elif page == "Analytics & SLA":
@@ -759,62 +756,6 @@ elif page == "Analytics & SLA":
         fig.update_layout(xaxis_title=None, yaxis_title="Number of Leads", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("### Summary")
-        total_leads = len(df)
-        awarded = len(df[df.status == LeadStatus.AWARDED])
-        lost = len(df[df.status == LeadStatus.LOST])
-        contacted_cnt = int(df.contacted.sum()) if "contacted" in df.columns else 0
-        insp_sched_cnt = int(df.inspection_scheduled.sum()) if "inspection_scheduled" in df.columns else 0
-        st.markdown(f"- Total leads: **{total_leads}**")
-        st.markdown(f"- Awarded: **{awarded}**")
-        st.markdown(f"- Lost: **{lost}**")
-        st.markdown(f"- Contacted: **{contacted_cnt}**")
-        st.markdown(f"- Inspections scheduled: **{insp_sched_cnt}**")
-
-        st.subheader("Conversion by Source")
-        conv = df.copy()
-        conv["awarded_flag"] = conv["status"].apply(lambda x: 1 if x == LeadStatus.AWARDED else 0)
-        conv_summary = conv.groupby("source").agg(leads=("id", "count"), awarded=("awarded_flag", "sum")).reset_index()
-        conv_summary["conversion_rate"] = (conv_summary["awarded"] / conv_summary["leads"] * 100).round(1)
-        st.dataframe(conv_summary.sort_values("leads", ascending=False))
-
-        # Qualified vs Unqualified charts
-        st.subheader("Qualified vs Unqualified — Time Breakdown")
-        ts = df.copy()
-        ts["created_date"] = pd.to_datetime(ts["created_at"]).dt.date
-        if "qualified" in ts.columns:
-            ts["qualified_flag"] = ts["qualified"].apply(lambda x: 1 if x else 0)
-        else:
-            ts["qualified_flag"] = 0
-        choice = st.selectbox("Range", ["Daily", "Weekly", "Monthly", "Yearly"])
-        if choice == "Daily":
-            agg = ts.groupby("created_date").agg(total=("id", "count"), qualified=("qualified_flag", "sum")).reset_index()
-            agg["unqualified"] = agg["total"] - agg["qualified"]
-            x = "created_date"
-        elif choice == "Weekly":
-            ts["week"] = pd.to_datetime(ts["created_at"]).dt.to_period("W").apply(lambda r: r.start_time.date())
-            agg = ts.groupby("week").agg(total=("id", "count"), qualified=("qualified_flag", "sum")).reset_index()
-            agg["unqualified"] = agg["total"] - agg["qualified"]
-            x = "week"
-        elif choice == "Monthly":
-            ts["month"] = pd.to_datetime(ts["created_at"]).dt.to_period("M").apply(lambda r: r.start_time.date())
-            agg = ts.groupby("month").agg(total=("id", "count"), qualified=("qualified_flag", "sum")).reset_index()
-            agg["unqualified"] = agg["total"] - agg["qualified"]
-            x = "month"
-        else:
-            ts["year"] = pd.to_datetime(ts["created_at"]).dt.to_period("Y").apply(lambda r: r.start_time.date())
-            agg = ts.groupby("year").agg(total=("id", "count"), qualified=("qualified_flag", "sum")).reset_index()
-            agg["unqualified"] = agg["total"] - agg["qualified"]
-            x = "year"
-
-        if not agg.empty:
-            fig2 = px.bar(agg, x=x, y=["qualified", "unqualified"], title=f"Qualified vs Unqualified ({choice})")
-            fig2.update_layout(plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("No data for selected range.")
-
-        # SLA overdue
         st.subheader("SLA / Overdue Leads")
         overdue_rows = []
         for _, row in df.iterrows():
@@ -856,16 +797,3 @@ elif page == "Exports":
     df_est = estimates_df(s)
     if not df_est.empty:
         st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode("utf-8"), file_name="estimates.csv", mime="text/csv")
-
-    st.markdown("---")
-    st.write("Uploaded invoices (saved locally):")
-    inv_dir = os.path.join(os.getcwd(), "uploaded_invoices")
-    if os.path.isdir(inv_dir):
-        files = os.listdir(inv_dir)
-        if files:
-            for f in files:
-                st.write(f"- {f}")
-        else:
-            st.write("No uploaded invoices yet.")
-    else:
-        st.write("No uploaded invoices yet.")
