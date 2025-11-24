@@ -535,440 +535,251 @@ if page == "Leads / Capture":
 # --- Page: Pipeline Board (UPGRADED)
 elif page == "Pipeline Board":
     st.header("🧭 Pipeline Dashboard")
+
     s = get_session()
     leads = s.query(Lead).order_by(Lead.created_at.desc()).all()
-    
+
     if not leads:
         st.info("No leads yet. Create one from Lead Capture.")
-    else:
-        df = leads_df(s)
-        weights = st.session_state.weights
-        
-        # Load ML model if exists (but we'll use standardized function)
-        try:
-            lead_model = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
-        except Exception:
-            lead_model = None
-        
-        # ==================== GOOGLE ADS-STYLE CARDS ====================
-        st.markdown("""
-        <style>
-        .metric-card {
-            background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%);
-            border-radius: 12px;
-            padding: 20px;
-            margin: 10px 0;
-            border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        .metric-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 12px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.3);
-        }
-        .metric-label {
-            font-size: 13px;
-            color: #93a0ad;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 8px;
-        }
-        .metric-value {
-            font-size: 32px;
-            font-weight: 700;
-            margin: 8px 0;
-        }
-        .metric-change {
-            font-size: 13px;
-            font-weight: 600;
-            padding: 4px 8px;
-            border-radius: 6px;
-            display: inline-block;
-        }
-        .metric-change.positive {
-            background: rgba(34, 197, 94, 0.15);
-            color: #22c55e;
-        }
-        .metric-change.negative {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-        }
-        .progress-bar {
-            width: 100%;
-            height: 8px;
-            background: rgba(255,255,255,0.1);
-            border-radius: 4px;
-            overflow: hidden;
-            margin-top: 12px;
-        }
-        .progress-fill {
-            height: 100%;
-            border-radius: 4px;
-            transition: width 0.3s ease;
-        }
-        .stage-badge {
-            display: inline-block;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            margin: 4px;
-        }
-        </style>
+        st.stop()
+
+    df = leads_df(s)
+    weights = st.session_state.weights
+
+    try:
+        lead_model = joblib.load("lead_conversion_model.pkl")
+    except:
+        lead_model = None
+
+    # ---------- GOOGLE ADS UI STYLE ----------
+    st.markdown("""
+    <style>
+    .metric-card {
+        background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%);
+        border-radius: 12px;
+        padding: 20px;
+        margin: 10px 0;
+        border: 1px solid rgba(255,255,255,0.08);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
+        transition: 0.2s;
+    }
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 12px rgba(0,0,0,0.4);
+    }
+    .metric-label { font-size:13px; color:#93a0ad; text-transform:uppercase; }
+    .metric-value { font-size:32px; font-weight:700; margin-top:6px; }
+    .metric-change { 
+        font-size:13px; padding:4px 8px; border-radius:6px; font-weight:600; 
+    }
+    .positive { background:rgba(34,197,94,0.2); color:#22c55e;}
+    .negative { background:rgba(239,68,68,0.2); color:#ef4444;}
+
+    .stage-card { margin-top:12px; }
+    .progress-bar {
+        width:100%; height:8px; background:rgba(255,255,255,0.1);
+        border-radius:4px; overflow:hidden; margin-top:10px;
+    }
+    .progress-fill { height:100%; border-radius:4px; transition:0.3s; }
+
+    .priority-card { margin:10px 0; padding:18px; border-radius:12px;
+        background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.05);
+    }
+    .stage-badge {
+        padding:6px 12px; border-radius:20px; font-size:12px; font-weight:600;
+        margin-left:10px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ---------- KPI METRICS ----------
+    total_leads = len(df)
+    qualified_leads = len(df[df["qualified"] == True])
+    total_value = df["estimated_value"].sum() if "estimated_value" in df else 0
+    awarded_count = len(df[df["status"] == LeadStatus.AWARDED])
+    lost_count = len(df[df["status"] == LeadStatus.LOST])
+    closed_total = awarded_count + lost_count
+    conversion_rate = (awarded_count / closed_total * 100) if closed_total else 0
+    active_leads = total_leads - closed_total
+
+    st.markdown("### 📊 Key Performance Indicators")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.markdown(f"""
+        <div class='metric-card'>
+            <div class='metric-label'>Total Leads</div>
+            <div class='metric-value' style='color:#2563eb;'>{total_leads}</div>
+            <div class='metric-change positive'>↑ {qualified_leads} Qualified</div>
+        </div>
         """, unsafe_allow_html=True)
-        
-        # Calculate metrics
-        total_leads = len(df)
-        qualified_leads = len(df[df['qualified'] == True])
-        total_value = df['estimated_value'].sum() if not df['estimated_value'].isna().all() else 0.0
-        awarded_leads = len(df[df['status'] == LeadStatus.AWARDED])
-        lost_leads = len(df[df['status'] == LeadStatus.LOST])
-        
-        # Conversion rate
-        closed_leads = awarded_leads + lost_leads
-        conversion_rate = (awarded_leads / closed_leads * 100) if closed_leads > 0 else 0
-        
-        # Stage counts
-        stage_counts = df['status'].value_counts().to_dict()
-        
-        # Stage colors mapping
-        stage_colors = {
-            LeadStatus.NEW: "#2563eb",
-            LeadStatus.CONTACTED: "#eab308",
-            LeadStatus.INSPECTION_SCHEDULED: "#f97316",
-            LeadStatus.INSPECTION_COMPLETED: "#14b8a6",
-            LeadStatus.ESTIMATE_SUBMITTED: "#a855f7",
-            LeadStatus.AWARDED: "#22c55e",
-            LeadStatus.LOST: "#ef4444"
-        }
-        
-        # Top row - Key metrics cards
-        st.markdown("### 📊 Key Performance Indicators")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
+
+    with col2:
+        st.markdown(f"""
+        <div class='metric-card'>
+            <div class='metric-label'>Pipeline Value</div>
+            <div class='metric-value' style='color:#22c55e;'>${total_value:,.0f}</div>
+            <div class='metric-change positive'>Active</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f"""
+        <div class='metric-card'>
+            <div class='metric-label'>Conversion Rate</div>
+            <div class='metric-value' style='color:#a855f7;'>{conversion_rate:.1f}%</div>
+            <div class='metric-change {'positive' if conversion_rate>50 else 'negative'}'>
+                {awarded_count}/{closed_total} Won
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col4:
+        st.markdown(f"""
+        <div class='metric-card'>
+            <div class='metric-label'>Active Leads</div>
+            <div class='metric-value' style='color:#f97316;'>{active_leads}</div>
+            <div class='metric-change positive'>In Progress</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ---------- PIPELINE STAGES ----------
+    st.markdown("### 📈 Pipeline Stages")
+
+    stage_colors = {
+        LeadStatus.NEW: "#2563eb",
+        LeadStatus.CONTACTED: "#eab308",
+        LeadStatus.INSPECTION_SCHEDULED: "#f97316",
+        LeadStatus.INSPECTION_COMPLETED: "#14b8a6",
+        LeadStatus.ESTIMATE_SUBMITTED: "#a855f7",
+        LeadStatus.AWARDED: "#22c55e",
+        LeadStatus.LOST: "#ef4444"
+    }
+
+    stage_counts = df["status"].value_counts().to_dict()
+
+    cols = st.columns(len(LeadStatus.ALL))
+    for i, stage in enumerate(LeadStatus.ALL):
+        count = stage_counts.get(stage, 0)
+        pct = (count / total_leads * 100) if total_leads else 0
+        color = stage_colors[stage]
+
+        with cols[i]:
             st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Total Leads</div>
-                <div class="metric-value" style="color: #2563eb;">{total_leads}</div>
-                <div class="metric-change positive">
-                    ↑ {qualified_leads} Qualified
+            <div class='metric-card stage-card'>
+                <div class='metric-label'>{stage}</div>
+                <div class='metric-value' style='color:{color};'>{count}</div>
+                <div class='progress-bar'>
+                    <div class='progress-fill' style='background:{color}; width:{pct}%'></div>
+                </div>
+                <div style='margin-top:6px; font-size:12px; color:#93a0ad; text-align:center;'>
+                    {pct:.1f}%
                 </div>
             </div>
             """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Pipeline Value</div>
-                <div class="metric-value" style="color: #22c55e;">{format_currency(total_value)}</div>
-                <div class="metric-change positive">
-                    ↑ Active
+
+    st.markdown("---")
+
+    # ---------- PRIORITY LEADS ----------
+    st.markdown("### 🎯 Priority Leads")
+
+    priority_items = []
+    for _, row in df.iterrows():
+        score, *_ = compute_priority_for_lead_row(row, weights)
+
+        # SLA
+        sla_entered = row["sla_entered_at"] or row["created_at"]
+        deadline = (pd.to_datetime(sla_entered) + timedelta(hours=row["sla_hours"]))
+        remaining = (deadline - datetime.utcnow()).total_seconds()
+        overdue = remaining <= 0
+        hours_left = max(int(remaining // 3600), 0)
+
+        # prediction
+        prob = predict_lead_probability(lead_model, row) if lead_model else None
+
+        priority_items.append({
+            "id": row["id"],
+            "name": row["contact_name"],
+            "value": row["estimated_value"] or 0,
+            "score": score,
+            "status": row["status"],
+            "overdue": overdue,
+            "time_left": hours_left,
+            "prob": prob,
+            "damage": row["damage_type"]
+        })
+
+    pr_df = pd.DataFrame(priority_items).sort_values("score", ascending=False)
+
+    for _, r in pr_df.head(8).iterrows():
+        color = (
+            "#ef4444" if r["score"] >= 0.7 else
+            "#f97316" if r["score"] >= 0.45 else
+            "#22c55e"
+        )
+        label = (
+            "🔴 CRITICAL" if r["score"] >= 0.7 else
+            "🟠 HIGH" if r["score"] >= 0.45 else
+            "🟢 NORMAL"
+        )
+        status_color = stage_colors[r["status"]]
+
+        sla_html = (
+            "<span style='color:#ef4444;'>❗ OVERDUE</span>"
+            if r["overdue"] else
+            f"<span style='color:#2563eb;'>⏳ {r['time_left']}h left</span>"
+        )
+
+        conv_html = ""
+        if r["prob"] is not None:
+            pct = int(r["prob"] * 100)
+            conv_color = "#22c55e" if pct > 70 else "#f97316" if pct > 40 else "#ef4444"
+            conv_html = f"<span style='margin-left:10px; color:{conv_color};'>📊 {pct}% Win</span>"
+
+        st.markdown(f"""
+        <div class='priority-card'>
+            <div style='display:flex; justify-content:space-between;'>
+                <div>
+                    <b style='color:{color};'>{label}</b>
+                    <span class='stage-badge'
+                        style='background:{status_color}30; color:{status_color};'>
+                        {r["status"]}
+                    </span>
+                    <div style='font-size:18px; font-weight:700; margin-top:6px;'>
+                        #{r["id"]} — {r["name"]}
+                    </div>
+                    <div style='color:#93a0ad; font-size:13px;'>
+                        {r["damage"].title()} | Est:
+                        <span style='color:#22c55e;'>${r['value']:,.0f}</span>
+                    </div>
+                    <div style='margin-top:6px; font-size:13px;'>
+                        {sla_html} {conv_html}
+                    </div>
+                </div>
+
+                <div style='text-align:right;'>
+                    <div style='font-size:36px; font-weight:700; color:{color};'>
+                        {r["score"]:.2f}
+                    </div>
+                    <div style='font-size:11px; color:#93a0ad;'>Priority</div>
                 </div>
             </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Conversion Rate</div>
-                <div class="metric-value" style="color: #a855f7;">{conversion_rate:.1f}%</div>
-                <div class="metric-change {'positive' if conversion_rate > 50 else 'negative'}">
-                    {awarded_leads}/{closed_leads} Won
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col4:
-            active_leads = total_leads - closed_leads
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Active Leads</div>
-                <div class="metric-value" style="color: #f97316;">{active_leads}</div>
-                <div class="metric-change {'positive' if active_leads > 0 else 'negative'}">
-                    In Progress
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        # Stage breakdown cards
-        st.markdown("### 📈 Pipeline Stages")
-        
-        stage_cols = st.columns(len(LeadStatus.ALL))
-        for idx, stage in enumerate(LeadStatus.ALL):
-            count = stage_counts.get(stage, 0)
-            color = stage_colors.get(stage, "#ffffff")
-            percentage = (count / total_leads * 100) if total_leads > 0 else 0
-            
-            with stage_cols[idx]:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">{stage}</div>
-                    <div class="metric-value" style="color: {color};">{count}</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" style="background: {color}; width: {percentage}%;"></div>
-                    </div>
-                    <div style="text-align: center; margin-top: 8px; font-size: 12px; color: #93a0ad;">
-                        {percentage:.1f}%
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        # Priority Leads Section
-        st.markdown("### 🎯 Priority Leads (Top 8)")
-        
-        # Calculate priorities
-        priority_list = []
-        for _, row in df.iterrows():
-            score, _, _, _, _, _, time_left = compute_priority_for_lead_row(row, weights)
-            
-            # SLA calculation
-            sla_entered = row.get("sla_entered_at") or row.get("created_at")
-            if isinstance(sla_entered, str):
-                try: 
-                    sla_entered = datetime.fromisoformat(sla_entered)
-                except: 
-                    sla_entered = datetime.utcnow()
-            deadline = sla_entered + timedelta(hours=int(row.get("sla_hours") or 24))
-            remaining = deadline - datetime.utcnow()
-            overdue = remaining.total_seconds() <= 0
-            
-            # Predicted conversion
-            prob = None
-            if lead_model is not None:
-                try:
-                    prob = predict_lead_probability(lead_model, row)
-                except:
-                    prob = None
-            
-            priority_list.append({
-                "id": int(row["id"]),
-                "contact_name": row.get("contact_name") or "No name",
-                "estimated_value": float(row.get("estimated_value") or 0.0),
-                "time_left_hours": float(remaining.total_seconds() / 3600.0),
-                "priority_score": score,
-                "status": row.get("status"),
-                "sla_overdue": overdue,
-                "sla_deadline": deadline,
-                "conversion_prob": prob,
-                "damage_type": row.get("damage_type", "Unknown")
-            })
-        
-        pr_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
-        
-        if not pr_df.empty:
-            for _, r in pr_df.head(8).iterrows():
-                score = r["priority_score"]
-                status_color = stage_colors.get(r["status"], "#ffffff")
-                
-                # Priority badge color
-                if score >= 0.7:
-                    priority_color = "#ef4444"
-                    priority_label = "🔴 CRITICAL"
-                elif score >= 0.45:
-                    priority_color = "#f97316"
-                    priority_label = "🟠 HIGH"
-                else:
-                    priority_color = "#22c55e"
-                    priority_label = "🟢 NORMAL"
-                
-                # SLA status
-                if r["sla_overdue"]:
-                    sla_html = f"<span style='color:#ef4444;font-weight:700;'>❗ OVERDUE</span>"
-                else:
-                    hours_left = int(r['time_left_hours'])
-                    mins_left = int((r['time_left_hours'] * 60) % 60)
-                    sla_html = f"<span style='color:#2563eb;font-weight:600;'>⏳ {hours_left}h {mins_left}m left</span>"
-                
-                # Conversion probability
-                conv_html = ""
-                if r["conversion_prob"] is not None:
-                    conv_pct = r["conversion_prob"] * 100
-                    conv_color = "#22c55e" if conv_pct > 70 else ("#f97316" if conv_pct > 40 else "#ef4444")
-                    conv_html = f"<span style='color:{conv_color};font-weight:600;margin-left:12px;'>📊 {conv_pct:.0f}% Win Prob</span>"
-                
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <div style="flex: 1;">
-                            <div style="margin-bottom: 8px;">
-                                <span style="color:{priority_color};font-weight:700;font-size:14px;">{priority_label}</span>
-                                <span class="stage-badge" style="background:{status_color}20;color:{status_color};border:1px solid {status_color}40;">
-                                    {r['status']}
-                                </span>
-                            </div>
-                            <div style="font-size: 18px; font-weight: 700; color: #ffffff; margin-bottom: 4px;">
-                                #{int(r['id'])} — {r['contact_name']}
-                            </div>
-                            <div style="font-size: 13px; color: #93a0ad; margin-bottom: 8px;">
-                                {r['damage_type'].title()} | Est: <span style="color:#22c55e;font-weight:700;">{format_currency(r['estimated_value'])}</span>
-                            </div>
-                            <div style="font-size: 13px;">
-                                {sla_html}
-                                {conv_html}
-                            </div>
-                        </div>
-                        <div style="text-align: right; padding-left: 20px;">
-                            <div style="font-size: 36px; font-weight: 700; color:{priority_color};">
-                                {score:.2f}
-                            </div>
-                            <div style="font-size: 11px; color: #93a0ad; text-transform: uppercase;">
-                                Priority
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No priority leads to display.")
-        
-        st.markdown("---")
-        
-        # Detailed Lead Cards (Expandable)
-        st.markdown("### 📋 All Leads")
-        
-        for lead in leads:
-            status_color = stage_colors.get(lead.status, "#ffffff")
-            est_val = lead.estimated_value or 0
-            
-            card_title = f"#{lead.id} — {lead.contact_name or 'No name'} — {lead.damage_type or 'Unknown'} — {format_currency(est_val)}"
-            
-            with st.expander(card_title, expanded=False):
-                # Lead info section
-                colA, colB = st.columns([3, 1])
-                
-                with colA:
-                    st.markdown(f"""
-                    <div style="padding: 10px; background: rgba(255,255,255,0.02); border-radius: 8px;">
-                        <div style="margin-bottom: 8px;">
-                            <span style="color:#93a0ad;">Source:</span> 
-                            <strong>{lead.source or '—'}</strong>
-                            <span style="margin-left: 16px; color:#93a0ad;">Assigned:</span> 
-                            <strong>{lead.assigned_to or '—'}</strong>
-                        </div>
-                        <div style="margin-bottom: 8px;">
-                            <span style="color:#93a0ad;">Address:</span> 
-                            <strong>{lead.property_address or '—'}</strong>
-                        </div>
-                        <div style="margin-bottom: 8px;">
-                            <span style="color:#93a0ad;">Notes:</span> 
-                            {lead.notes or '—'}
-                        </div>
-                        <div>
-                            <span style="color:#93a0ad;">Created:</span> 
-                            {lead.created_at.strftime('%Y-%m-%d %H:%M') if lead.created_at else '—'}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with colB:
-                    # SLA and status
-                    entered = lead.sla_entered_at or lead.created_at
-                    if isinstance(entered, str):
-                        try: 
-                            entered = datetime.fromisoformat(entered)
-                        except: 
-                            entered = datetime.utcnow()
-                    
-                    deadline = entered + timedelta(hours=(lead.sla_hours or 24))
-                    remaining = deadline - datetime.utcnow()
-                    
-                    if remaining.total_seconds() <= 0:
-                        sla_status = f"<div style='color:#ef4444;font-weight:700;'>❗ OVERDUE</div>"
-                    else:
-                        hours = int(remaining.total_seconds() // 3600)
-                        mins = int((remaining.total_seconds() % 3600) // 60)
-                        sla_status = f"<div style='color:#2563eb;font-weight:600;'>⏳ {hours}h {mins}m</div>"
-                    
-                    st.markdown(f"""
-                    <div style="text-align: right;">
-                        <div class="stage-badge" style="background:{status_color}20;color:{status_color};border:1px solid {status_color}40;">
-                            {lead.status}
-                        </div>
-                        <div style="margin-top: 12px;">
-                            {sla_status}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                st.markdown("---")
-                
-                # Quick contact buttons
-                qc1, qc2, qc3, qc4 = st.columns([1, 1, 1, 4])
-                phone = (lead.contact_phone or "").strip()
-                email = (lead.contact_email or "").strip()
-                
-                if phone:
-                    with qc1:
-                        st.markdown(f"""
-                        <a href='tel:{phone}' style='text-decoration:none;'>
-                            <button style='background:#2563eb;color:#000;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;width:100%;font-weight:600;'>
-                                📞 Call
-                            </button>
-                        </a>
-                        """, unsafe_allow_html=True)
-                    
-                    wa_number = phone.lstrip("+").replace(" ", "").replace("-", "")
-                    wa_link = f"https://wa.me/{wa_number}?text=Hi%2C%20following%20up%20on%20your%20restoration%20request."
-                    with qc2:
-                        st.markdown(f"""
-                        <a href='{wa_link}' target='_blank' style='text-decoration:none;'>
-                            <button style='background:#25D366;color:#000;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;width:100%;font-weight:600;'>
-                                💬 WhatsApp
-                            </button>
-                        </a>
-                        """, unsafe_allow_html=True)
-                
-                if email:
-                    with qc3:
-                        st.markdown(f"""
-                        <a href='mailto:{email}?subject=Follow%20up' style='text-decoration:none;'>
-                            <button style='background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:8px;padding:8px 12px;cursor:pointer;width:100%;font-weight:600;'>
-                                ✉️ Email
-                            </button>
-                        </a>
-                        """, unsafe_allow_html=True)
-                
-                st.markdown("---")
-                
-                # Lead update form
-                with st.form(f"update_lead_{lead.id}"):
-                    st.markdown("#### Update Lead")
-                    
-                    ucol1, ucol2 = st.columns(2)
-                    with ucol1:
-                        new_status = st.selectbox("Status", LeadStatus.ALL, index=LeadStatus.ALL.index(lead.status) if lead.status in LeadStatus.ALL else 0, key=f"status_{lead.id}")
-                        new_assigned = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
-                        contacted = st.checkbox("Contacted", value=lead.contacted, key=f"contacted_{lead.id}")
-                    
-                    with ucol2:
-                        inspection_scheduled = st.checkbox("Inspection Scheduled", value=lead.inspection_scheduled, key=f"insp_sched_{lead.id}")
-                        inspection_completed = st.checkbox("Inspection Completed", value=lead.inspection_completed, key=f"insp_comp_{lead.id}")
-                        estimate_submitted = st.checkbox("Estimate Submitted", value=lead.estimate_submitted, key=f"est_sub_{lead.id}")
-                    
-                    new_notes = st.text_area("Notes", value=lead.notes or "", key=f"notes_{lead.id}")
-                    
-                    if st.form_submit_button("💾 Update Lead"):
-                        # update DB record
-                        s_db = get_session()
-                        lead_db = s_db.query(Lead).filter(Lead.id == lead.id).first()
-                        if lead_db:
-                            lead_db.status = new_status
-                            lead_db.assigned_to = new_assigned
-                            lead_db.contacted = contacted
-                            lead_db.inspection_scheduled = inspection_scheduled
-                            lead_db.inspection_completed = inspection_completed
-                            lead_db.estimate_submitted = estimate_submitted
-                            lead_db.notes = new_notes
-                            s_db.add(lead_db)
-                            s_db.commit()
-                        st.success(f"Lead #{lead.id} updated!")
-                        st.experimental_rerun()
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ---------- EXPANDABLE LEAD CARDS ----------
+    st.markdown("### 📋 All Leads")
+
+    for lead in leads:
+        st.markdown(f"#### #{lead.id} — {lead.contact_name} ({lead.damage_type})")
+
+        with st.expander("View / Edit"):
+            st.write(lead)
+
                 
                 # Estimates section
                 st.markdown("#### 💰 Estimates")
