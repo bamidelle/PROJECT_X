@@ -1,18 +1,24 @@
 # project_x_all_in_one.py
 """
-Assan / Project X — ALL-IN-ONE Streamlit app (Option C: Clean Full Feature Version
-with predict_lead_probability standardized)
+Project X — ALL-IN-ONE Streamlit app (Option B: Everything included)
 
 - Single-file Streamlit app with SQLite + SQLAlchemy
-- Google Ads–style Pipeline Dashboard integrated
-- Migration-safe DB init
-- Utilities (SLA, priority scoring, file save, formatting)
-- ML placeholder using predict_lead_probability(model, row)
+- Full feature set merged (Leads capture, Pipeline Board, Analytics, Exports)
+- Pipeline Board upgraded with Google Ads–style dashboard:
+    * Clickable stage cards (filters)
+    * CSS animations & hover effects
+    * Auto-refresh (configurable, safe)
+    * SLA countdown badges
+    * Lightweight "Kanban-like" move-left/move-right controls (no external libs)
+- Safe ML integration using `predict_lead_probability(model, row)` if `lead_conversion_model.pkl` exists
+Run:
+    streamlit run project_x_all_in_one.py
 """
 
 import os
-from datetime import datetime, timedelta, date as date_, time as time_
+from datetime import datetime, timedelta, date as _date, time as _time
 import io
+import math
 
 import streamlit as st
 import pandas as pd
@@ -32,7 +38,6 @@ Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 
-# Migration-safe column defs (SQLite-friendly)
 MIGRATION_COLUMNS = {
     "contacted": "INTEGER DEFAULT 0",
     "inspection_scheduled": "INTEGER DEFAULT 0",
@@ -49,6 +54,8 @@ MIGRATION_COLUMNS = {
     "qualified": "INTEGER DEFAULT 0"
 }
 
+MODEL_PATH = "lead_conversion_model.pkl"
+
 # ---------------------------
 # APP CSS
 # ---------------------------
@@ -58,56 +65,27 @@ APP_CSS = """
   --bg:#0b0f13;
   --muted:#93a0ad;
   --white:#ffffff;
-  --placeholder:#3a3a3a;
-  --radius:10px;
-  --primary-red:#ff2d2d;
   --money-green:#22c55e;
-  --call-blue:#2563eb;
-  --wa-green:#25D366;
+  --primary-blue:#2563eb;
+  --accent-orange:#f97316;
+  --danger:#ef4444;
 }
-
-/* Base */
 body, .stApp {
   background: linear-gradient(180deg, #06070a 0%, #0b0f13 100%);
   color: var(--white);
   font-family: 'Roboto', sans-serif;
 }
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-  background: transparent !important;
-  padding: 18px;
-  border-right: 1px solid rgba(255,255,255,0.03);
-}
-
-/* Header */
 .header { padding: 12px; color: var(--white); font-weight:600; font-size:18px; }
-
-/* Money values (green) */
-.money { color: var(--money-green); font-weight:700; }
-
-/* Quick contact overrides for inline use */
-.quick-call { background: var(--call-blue); color:#000; border-radius:8px; padding:6px 10px; border:none; }
-.quick-wa { background: var(--wa-green); color:#000; border-radius:8px; padding:6px 10px; border:none; }
-
-/* KPI metric card */
-.metric-card {
-    padding: 18px;
-    border-radius: 12px;
-    color: white;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.22);
-    text-align: left;
-    margin-bottom: 12px;
-}
-.metric-number { font-size: 34px; font-weight: 700; margin-bottom: -6px; }
-.metric-label { font-size: 15px; opacity: 0.95; }
-
-/* Form submit buttons -> red background with black text */
-div[data-testid="stFormSubmitButton"] > button, button.stButton[data-testid="stFormSubmitButton"] > button {
-  background: var(--primary-red) !important;
-  color: #000000 !important;
-  border: 1px solid var(--primary-red) !important;
-}
+.metric-card { padding: 18px; border-radius: 12px; color: white; box-shadow: 0 6px 18px rgba(0,0,0,0.22); text-align: left; margin-bottom: 12px; transition: transform 0.12s ease;}
+.metric-card:hover { transform: translateY(-4px); }
+.metric-label { font-size: 13px; color: #93a0ad; text-transform:uppercase; letter-spacing:0.6px;}
+.metric-value { font-size: 32px; font-weight:700; margin-top:6px; }
+.progress-bar { width:100%; height:8px; background: rgba(255,255,255,0.06); border-radius:4px; overflow:hidden; margin-top:10px; }
+.progress-fill { height:100%; border-radius:4px; transition: width 0.3s ease; }
+.stage-badge { padding:6px 12px; border-radius:20px; font-size:12px; font-weight:600; margin-left:8px; }
+.priority-card { margin:10px 0; padding:18px; border-radius:12px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.03); }
+.small-muted { color:#93a0ad; font-size:13px; }
+.btn-mini { padding:6px 10px; border-radius:8px; border:none; cursor:pointer; font-weight:600; }
 """
 
 # ---------------------------
@@ -249,7 +227,6 @@ def create_estimate(session, lead_id, amount, details=""):
     est = Estimate(lead_id=lead_id, amount=amount, details=details, created_at=datetime.utcnow())
     session.add(est)
     session.commit()
-    # update lead
     lead = session.query(Lead).filter(Lead.id == lead_id).first()
     if lead:
         lead.estimated_value = float(amount)
@@ -296,13 +273,13 @@ def mark_estimate_lost(session, estimate_id, reason="Lost"):
 # ---------------------------
 # UTILITIES
 # ---------------------------
-def combine_date_time(d: date_, t: time_):
+def combine_date_time(d: _date, t: _time):
     if d is None and t is None:
         return None
     if d is None:
         d = datetime.utcnow().date()
     if t is None:
-        t = time_.min
+        t = _time.min
     return datetime.combine(d, t)
 
 def save_uploaded_file(uploaded_file, lead_id, folder_name="uploaded_invoices"):
@@ -318,7 +295,7 @@ def save_uploaded_file(uploaded_file, lead_id, folder_name="uploaded_invoices"):
 
 def format_currency(val, currency="$"):
     try:
-        if val is None or (isinstance(val, float) and (pd.isna(val))):
+        if val is None or (isinstance(val, float) and pd.isna(val)):
             return f"{currency}0.00"
         return f"{currency}{float(val):,.2f}"
     except Exception:
@@ -348,9 +325,6 @@ def remaining_sla_hms(seconds):
     return f"{h:02d}:{m:02d}:{sec:02d}"
 
 def compute_priority_for_lead_row(lead_row, weights):
-    """
-    Returns: (score, value_score, sla_score, contacted_flag, inspection_flag, estimate_flag, time_left_h)
-    """
     val = float(lead_row.get("estimated_value") or 0.0)
     baseline = weights.get("value_baseline", 5000.0)
     value_score = min(val / baseline, 1.0)
@@ -402,26 +376,14 @@ def compute_priority_for_lead_row(lead_row, weights):
 # ---------------------------
 # ML placeholder (standardized name)
 # ---------------------------
-MODEL_PATH = "lead_conversion_model.pkl"
-
 def predict_lead_probability(model, row):
-    """
-    Standardized function name requested by user.
-    Accepts:
-      - model: a scikit-learn-like model with predict_proba
-      - row: pandas Series or dict with lead fields (estimated_value, contacted, inspection_scheduled, estimate_submitted)
-    Returns probability (0..1) or None on failure.
-    """
     try:
-        # Accept either a pandas Series or a dict-like
         if hasattr(row, "to_dict"):
             rd = row.to_dict()
         elif isinstance(row, dict):
             rd = row
         else:
-            # fallback: try to index
             rd = dict(row)
-
         features = [
             float(rd.get("estimated_value") or 0),
             1.0 if bool(rd.get("contacted")) else 0.0,
@@ -434,7 +396,6 @@ def predict_lead_probability(model, row):
         return None
 
 def predict_lead_probability_safe(row):
-    """Load model if exists and return predicted probability or None."""
     if not os.path.exists(MODEL_PATH):
         return None
     try:
@@ -457,7 +418,6 @@ with st.sidebar:
     page = st.radio("Go to", ["Leads / Capture", "Pipeline Board", "Analytics & SLA", "Exports"], index=0)
     st.markdown("---")
 
-    # priority tuning stored in session_state
     if "weights" not in st.session_state:
         st.session_state.weights = {
             "value_weight": 0.5, "sla_weight": 0.35, "urgency_weight": 0.15,
@@ -532,321 +492,13 @@ if page == "Leads / Capture":
     else:
         st.dataframe(df.sort_values("created_at", ascending=False).head(50))
 
-# --- Page: Pipeline Board (UPGRADED)
-elif page == "Pipeline Board":
-    st.header("🧭 Pipeline Dashboard (Google Ads Style + Auto Updates)")
-
-    # Database session
-    s = get_session()
-    leads = s.query(Lead).order_by(Lead.created_at.desc()).all()
-
-    if not leads:
-        st.info("No leads yet. Create one from Lead Capture.")
-        st.stop()
-
-    df = leads_df(s)
-    weights = st.session_state.weights
-
-    # Load ML model safely
-    try:
-        lead_model = joblib.load("lead_conversion_model.pkl") if os.path.exists("lead_conversion_model.pkl") else None
-    except:
-        lead_model = None
-
-    # --------------------------
-    # Session-State for Filters
-    # --------------------------
-    if "pipeline_stage_filter" not in st.session_state:
-        st.session_state.pipeline_stage_filter = None  # Show all by default
-    if "pipeline_autorefresh" not in st.session_state:
-        st.session_state.pipeline_autorefresh = True
-    if "pipeline_autorefresh_ms" not in st.session_state:
-        st.session_state.pipeline_autorefresh_ms = 30000  # 30s refresh
-
-    # Auto refresh UI
-    if st.session_state.pipeline_autorefresh:
-        st.experimental_rerun()
-
-    # --------------------------
-    # GOOGLE ADS STYLE CSS
-    # --------------------------
-    st.markdown("""
-    <style>
-        .metric-card {
-            background: linear-gradient(135deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.02) 100%);
-            border-radius: 14px;
-            padding: 20px;
-            margin: 12px 0;
-            border: 1px solid rgba(255,255,255,0.1);
-            box-shadow: 0 4px 10px rgba(0,0,0,0.35);
-            transition: transform 0.25s ease, box-shadow 0.25s ease;
-        }
-        .metric-card:hover {
-            transform: scale(1.02);
-            box-shadow: 0 8px 20px rgba(0,0,0,0.45);
-        }
-        .stage-card-click {
-            cursor: pointer;
-            transition: 0.2s;
-        }
-        .stage-card-click:hover {
-            opacity: 0.85;
-            transform: translateY(-3px);
-        }
-        .progress-bar {
-            height: 8px;
-            background: rgba(255,255,255,0.12);
-            border-radius: 6px;
-            overflow: hidden;
-        }
-        .progress-fill {
-            height: 100%;
-            transition: width 0.4s ease;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # --------------------------
-    # BASIC METRICS
-    # --------------------------
-    total_leads = len(df)
-    qualified_leads = len(df[df["qualified"] == True])
-    awarded_leads = len(df[df["status"] == LeadStatus.AWARDED])
-    lost_leads = len(df[df["status"] == LeadStatus.LOST])
-    total_value = df["estimated_value"].sum()
-
-    closed = awarded_leads + lost_leads
-    conversion_rate = (awarded_leads / closed * 100) if closed > 0 else 0
-    active = total_leads - closed
-
-    # --------------------------
-    # METRIC CARDS
-    # --------------------------
-    st.subheader("📊 Key Performance Indicators")
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div style="color:#9ca3af;font-size:12px;">Total Leads</div>
-            <div style="font-size:32px;font-weight:700;color:#2563eb;">{total_leads}</div>
-            <div style="color:#22c55e;">↑ {qualified_leads} Qualified</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div style="color:#9ca3af;font-size:12px;">Pipeline Value</div>
-            <div style="font-size:32px;font-weight:700;color:#22c55e;">${total_value:,.0f}</div>
-            <div style="color:#22c55e;">↑ Active</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div style="color:#9ca3af;font-size:12px;">Conversion Rate</div>
-            <div style="font-size:32px;font-weight:700;color:#a855f7;">{conversion_rate:.1f}%</div>
-            <div style="color:{'#22c55e' if conversion_rate>50 else '#ef4444'};">
-                {awarded_leads}/{closed} Won
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div style="color:#9ca3af;font-size:12px;">Active Leads</div>
-            <div style="font-size:32px;font-weight:700;color:#f97316;">{active}</div>
-            <div>In Progress</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # --------------------------
-    # STAGE CARDS (CLICKABLE)
-    # --------------------------
-    st.subheader("📈 Pipeline Stages (Click to Filter)")
-
-    stage_counts = df["status"].value_counts().to_dict()
-    stage_colors = {
-        LeadStatus.NEW: "#2563eb",
-        LeadStatus.CONTACTED: "#eab308",
-        LeadStatus.INSPECTION_SCHEDULED: "#f97316",
-        LeadStatus.INSPECTION_COMPLETED: "#14b8a6",
-        LeadStatus.ESTIMATE_SUBMITTED: "#a855f7",
-        LeadStatus.AWARDED: "#22c55e",
-        LeadStatus.LOST: "#ef4444"
-    }
-
-    cols = st.columns(len(LeadStatus.ALL))
-
-    for i, stg in enumerate(LeadStatus.ALL):
-        count = stage_counts.get(stg, 0)
-        pct = (count / total_leads * 100) if total_leads else 0
-        color = stage_colors[stg]
-
-        with cols[i]:
-            if st.button(stg, key=f"stg_btn_{stg}"):
-                st.session_state.pipeline_stage_filter = stg
-
-            st.markdown(f"""
-            <div class="metric-card stage-card-click">
-                <div style="color:#9ca3af;font-size:12px;">{stg}</div>
-                <div style="font-size:24px;font-weight:700;color:{color};">{count}</div>
-                <div class="progress-bar">
-                    <div class="progress-fill" style="background:{color}; width:{pct}%;"></div>
-                </div>
-                <div style="text-align:center;color:#9ca3af;font-size:12px;margin-top:6px;">
-                    {pct:.1f}%
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # Apply filter if selected
-    if st.session_state.pipeline_stage_filter:
-        df = df[df["status"] == st.session_state.pipeline_stage_filter]
-
-    # --------------------------
-    # PRIORITY ENGINE
-    # --------------------------
-    st.subheader("🎯 Priority Leads")
-
-    priority_list = []
-
-    for _, row in df.iterrows():
-        score, *_ = compute_priority_for_lead_row(row, weights)
-
-        sla_entered = row.get("sla_entered_at") or row.get("created_at")
-        if isinstance(sla_entered, str):
-            try: sla_entered = datetime.fromisoformat(sla_entered)
-            except: sla_entered = datetime.utcnow()
-
-        deadline = sla_entered + timedelta(hours=int(row.get("sla_hours") or 24))
-        remaining = deadline - datetime.utcnow()
-        overdue = remaining.total_seconds() <= 0
-
-        # Model prediction
-        prob = None
-        if lead_model is not None:
-            try:
-                prob = predict_lead_probability(lead_model, row)
-            except:
-                prob = None
-
-        priority_list.append({
-            "id": int(row["id"]),
-            "contact_name": row.get("contact_name"),
-            "status": row.get("status"),
-            "estimated_value": float(row.get("estimated_value") or 0),
-            "priority_score": score,
-            "sla_overdue": overdue,
-            "time_left_hours": remaining.total_seconds() / 3600,
-            "conversion_prob": prob
-        })
-
-    pr_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
-
-    if pr_df.empty:
-        st.info("No leads available.")
-    else:
-        for _, r in pr_df.head(6).iterrows():
-            color = "#ef4444" if r["priority_score"] >= 0.7 else "#f97316" if r["priority_score"] >= 0.45 else "#22c55e"
-            st.markdown(f"""
-            <div class="metric-card">
-                <div style="font-size:18px;font-weight:700;color:{color};">Priority {r['priority_score']:.2f}</div>
-                <div style="color:#fff;">#{r["id"]} — {r["contact_name"]}</div>
-                <div style="color:#9ca3af;font-size:13px;">Est: ${r["estimated_value"]:,.0f}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-
-    # ---------- PIPELINE STAGES ----------
-    st.markdown("### 📈 Pipeline Stages")
-
-    stage_colors = {
-        LeadStatus.NEW: "#2563eb",
-        LeadStatus.CONTACTED: "#eab308",
-        LeadStatus.INSPECTION_SCHEDULED: "#f97316",
-        LeadStatus.INSPECTION_COMPLETED: "#14b8a6",
-        LeadStatus.ESTIMATE_SUBMITTED: "#a855f7",
-        LeadStatus.AWARDED: "#22c55e",
-        LeadStatus.LOST: "#ef4444"
-    }
-
-    stage_counts = df["status"].value_counts().to_dict()
-
-    cols = st.columns(len(LeadStatus.ALL))
-    for i, stage in enumerate(LeadStatus.ALL):
-        count = stage_counts.get(stage, 0)
-        pct = (count / total_leads * 100) if total_leads else 0
-        color = stage_colors[stage]
-
-        with cols[i]:
-            st.markdown(f"""
-            <div class='metric-card stage-card'>
-                <div class='metric-label'>{stage}</div>
-                <div class='metric-value' style='color:{color};'>{count}</div>
-                <div class='progress-bar'>
-                    <div class='progress-fill' style='background:{color}; width:{pct}%'></div>
-                </div>
-                <div style='margin-top:6px; font-size:12px; color:#93a0ad; text-align:center;'>
-                    {pct:.1f}%
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # ---------- PRIORITY LEADS ----------
-# ==================== PRIORITY LEADS CALCULATION ====================
-st.markdown("### 🎯 Priority Leads (Top 8)")
-
-priority_list = []
-weights = st.session_state.weights
-
-for _, row in df.iterrows():
-    score, _, _, _, _, _, time_left = compute_priority_for_lead_row(row, weights)
-    
-    # SLA calculation
-    sla_entered = row.get("sla_entered_at") or row.get("created_at")
-    if isinstance(sla_entered, str):
-        try: 
-            sla_entered = datetime.fromisoformat(sla_entered)
-        except: 
-            sla_entered = datetime.utcnow()
-    elif pd.isna(sla_entered):
-        sla_entered = datetime.utcnow()
-        
-    deadline = sla_entered + timedelta(hours=int(row.get("sla_hours") or 24))
-    remaining = deadline - datetime.utcnow()
-    overdue = remaining.total_seconds() <= 0
-    
-    priority_list.append({
-        "id": int(row["id"]),
-        "contact_name": row.get("contact_name") or "No name",
-        "estimated_value": float(row.get("estimated_value") or 0.0),
-        "time_left_hours": float(remaining.total_seconds() / 3600.0),
-        "priority_score": score,
-        "status": row.get("status"),
-        "sla_overdue": overdue,
-        "sla_deadline": deadline,
-        "damage_type": row.get("damage_type", "Unknown")
-    })
-
-pr_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
-
-# ==================== PRIORITY LEADS DISPLAY (FIXED) ====================
-# REPLACE your entire existing "Pipeline Board" block with the code below.
-# Insert this replacement starting exactly at:
-#   elif page == "Pipeline Board":
-# and ending just before the next `elif page == "Analytics & SLA":` block.
+# ========== REPLACE your existing Pipeline Board block with the code below ==========
+# Replace starting at:
+#    elif page == "Pipeline Board":
+# and end before:
+#    elif page == "Analytics & SLA":
+#
+# (The block below is self-contained and includes interactive features chosen)
 
 elif page == "Pipeline Board":
     st.header("🧭 Pipeline Dashboard (Google Ads style — interactive)")
@@ -854,149 +506,87 @@ elif page == "Pipeline Board":
     s = get_session()
     leads = s.query(Lead).order_by(Lead.created_at.desc()).all()
 
-    # If no leads, short-circuit (keeps UI consistent)
     if not leads:
         st.info("No leads yet. Create one from Lead Capture.")
         st.stop()
 
-    # Dataframe for calculations
     df = leads_df(s)
     weights = st.session_state.weights
 
-    # Try load model (optional; safe)
+    # Load model safely if present
     try:
         lead_model = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
     except Exception:
         lead_model = None
 
     # -------------------------
-    # Session-state: filters & autorefresh
+    # session-state: filters & autorefresh
     # -------------------------
     if "pipeline_stage_filter" not in st.session_state:
-        st.session_state.pipeline_stage_filter = None  # None -> show all
+        st.session_state.pipeline_stage_filter = None
     if "pipeline_autorefresh" not in st.session_state:
         st.session_state.pipeline_autorefresh = True
-    if "pipeline_autorefresh_ms" not in st.session_state:
-        st.session_state.pipeline_autorefresh_ms = 30000  # 30s
+    if "pipeline_last_refresh" not in st.session_state:
+        st.session_state.pipeline_last_refresh = datetime.utcnow()
 
-    # optional small control row (filter clear + autorefresh toggle)
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
-    with ctrl_col1:
-        if st.button("Clear stage filter"):
+    AUTORELOAD_INTERVAL_SEC = 30
+
+    # top control row (filter + toggle)
+    ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 1, 1, 1])
+    with ctrl1:
+        st.markdown("**Filter Pipeline** — click a stage card below to filter leads by stage. Click again to clear.")
+    with ctrl2:
+        if st.button("Clear filter"):
             st.session_state.pipeline_stage_filter = None
-            st.experimental_rerun()
-    with ctrl_col2:
-        if st.checkbox("Auto-refresh (30s)", value=st.session_state.pipeline_autorefresh, key="ui_autorefresh_toggle"):
-            st.session_state.pipeline_autorefresh = True
-        else:
-            st.session_state.pipeline_autorefresh = False
-    with ctrl_col3:
-        # quick search / filter input
-        txt = st.text_input("Quick search (name, address, damage type)", value="", key="pipeline_quick_search")
-        st.session_state.pipeline_quick_search = txt.strip()
+    with ctrl3:
+        ar = st.checkbox("Auto-refresh (30s)", value=st.session_state.pipeline_autorefresh)
+        st.session_state.pipeline_autorefresh = bool(ar)
+    with ctrl4:
+        st.markdown(f"<div class='small-muted'>Last refresh: {st.session_state.pipeline_last_refresh.strftime('%Y-%m-%d %H:%M:%S')}</div>", unsafe_allow_html=True)
 
-    # Add safe JS-based page reload if autorefresh enabled
+    # auto-refresh logic (safe): rerun if enabled and interval passed
     if st.session_state.pipeline_autorefresh:
-        # reloads the page every N milliseconds (non-blocking)
-        st.components.v1.html(
-            f"""
-            <script>
-               const AUTO_REFRESH_MS = {int(st.session_state.pipeline_autorefresh_ms)};
-               if (!window._pipeline_autorefresh_registered) {{
-                  window._pipeline_autorefresh_registered = true;
-                  setInterval(()=>{{ location.reload(); }}, AUTO_REFRESH_MS);
-               }}
-            </script>
-            """,
-            height=0,
-            scrolling=False,
-        )
+        now = datetime.utcnow()
+        elapsed = (now - st.session_state.pipeline_last_refresh).total_seconds()
+        if elapsed >= AUTORELOAD_INTERVAL_SEC:
+            st.session_state.pipeline_last_refresh = now
+            st.experimental_rerun()
 
-    # ---------- GOOGLE ADS UI CSS + animations ----------
-    st.markdown(
-        """
+    # ---------- GOOGLE ADS UI STYLE ----------
+    st.markdown("""
     <style>
-    .metric-card {
-        background: linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
-        border-radius: 12px;
-        padding: 18px;
-        margin: 8px 0;
-        border: 1px solid rgba(255,255,255,0.04);
-        box-shadow: 0 6px 18px rgba(0,0,0,0.22);
-        transition: transform 0.18s ease, box-shadow 0.18s ease;
-        cursor: pointer;
-    }
-    .metric-card:hover { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(0,0,0,0.28); }
-    .metric-label { font-size:12px; color:#93a0ad; text-transform:uppercase; letter-spacing:0.6px; }
-    .metric-value { font-size:28px; font-weight:700; margin-top:6px; }
-    .metric-change { font-size:12px; padding:4px 8px; border-radius:6px; display:inline-block; font-weight:600; }
-    .positive { background: rgba(34,197,94,0.12); color:#22c55e; }
-    .negative { background: rgba(239,68,68,0.12); color:#ef4444; }
-
-    .stage-card { padding:12px; border-radius:10px; transition: transform .15s; }
-    .stage-card:hover { transform: translateY(-3px); }
-
-    .progress-bar { width:100%; height:8px; background:rgba(255,255,255,0.06); border-radius:6px; overflow:hidden; margin-top:8px; }
-    .progress-fill { height:100%; border-radius:6px; transition: width .25s ease; }
-
-    .priority-card { margin:12px 0; padding:14px; border-radius:12px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.03); }
-    .stage-badge { padding:6px 12px; border-radius:20px; font-size:12px; font-weight:700; margin-left:10px; display:inline-block; opacity:0.95; }
-    .sla-badge { padding:6px 10px; border-radius:12px; font-weight:700; font-size:12px; display:inline-block; }
-
-    /* subtle fade-in for new elements */
-    @keyframes fadeInUp {
-      from { opacity: 0; transform: translateY(6px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .metric-card, .priority-card { animation: fadeInUp .35s ease both; }
+    .metric-card { background: linear-gradient(135deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:12px; padding:14px; }
+    .metric-card:hover { transform: translateY(-4px); }
+    .stage-click { cursor: pointer; }
     </style>
-    """,
-        unsafe_allow_html=True,
-    )
+    """, unsafe_allow_html=True)
 
-    # ---------- KPI METRICS (interactive: clicking a card filters by common group) ----------
+    # ---------- KPI METRICS ----------
     total_leads = len(df)
     qualified_leads = len(df[df["qualified"] == True]) if "qualified" in df else 0
-    total_value = float(df["estimated_value"].sum()) if "estimated_value" in df else 0.0
-    awarded_count = len(df[df["status"] == LeadStatus.AWARDED]) if "status" in df else 0
-    lost_count = len(df[df["status"] == LeadStatus.LOST]) if "status" in df else 0
+    total_value = df["estimated_value"].sum() if "estimated_value" in df and not df["estimated_value"].isna().all() else 0.0
+    awarded_count = len(df[df["status"] == LeadStatus.AWARDED])
+    lost_count = len(df[df["status"] == LeadStatus.LOST])
     closed_total = awarded_count + lost_count
-    conversion_rate = (awarded_count / closed_total * 100) if closed_total else 0
+    conversion_rate = (awarded_count / closed_total * 100) if closed_total else 0.0
     active_leads = total_leads - closed_total
 
     st.markdown("### 📊 Key Performance Indicators")
     k1, k2, k3, k4 = st.columns(4)
-
-    # helper to create clickable div (uses query param to store selection)
-    def _set_stage_filter(stage_name):
-        st.session_state.pipeline_stage_filter = stage_name
-        st.experimental_rerun()
-
     with k1:
-        # Total leads clickable -> clears filter (show all)
-        if st.button(f"Total Leads: {total_leads}", key="btn_total_leads"):
-            _set_stage_filter(None)
-        st.markdown(f"<div class='metric-change positive'>↑ {qualified_leads} Qualified</div>", unsafe_allow_html=True)
-
+        st.markdown(f"""<div class='metric-card'><div class='metric-label'>Total Leads</div><div class='metric-value' style='color:#2563eb;'>{total_leads}</div><div class='small-muted'>↑ {qualified_leads} Qualified</div></div>""", unsafe_allow_html=True)
     with k2:
-        if st.button(f"Pipeline Value: {format_currency(total_value)}", key="btn_pipeline_value"):
-            _set_stage_filter(None)
-        st.markdown("<div class='metric-change positive'>Active</div>", unsafe_allow_html=True)
-
+        st.markdown(f"""<div class='metric-card'><div class='metric-label'>Pipeline Value</div><div class='metric-value' style='color:#22c55e;'>{format_currency(total_value)}</div><div class='small-muted'>Active</div></div>""", unsafe_allow_html=True)
     with k3:
-        if st.button(f"Conversion: {conversion_rate:.1f}%", key="btn_conversion"):
-            _set_stage_filter(None)
-        st.markdown(f"<div class='metric-change {'positive' if conversion_rate>50 else 'negative'}'>{awarded_count}/{closed_total} Won</div>", unsafe_allow_html=True)
-
+        status_cls = "positive" if conversion_rate > 50 else "negative"
+        st.markdown(f"""<div class='metric-card'><div class='metric-label'>Conversion Rate</div><div class='metric-value' style='color:#a855f7;'>{conversion_rate:.1f}%</div><div class='metric-change {status_cls}'>{awarded_count}/{closed_total} Won</div></div>""", unsafe_allow_html=True)
     with k4:
-        if st.button(f"Active Leads: {active_leads}", key="btn_active"):
-            _set_stage_filter(None)
-        st.markdown("<div class='metric-change positive'>In Progress</div>", unsafe_allow_html=True)
+        st.markdown(f"""<div class='metric-card'><div class='metric-label'>Active Leads</div><div class='metric-value' style='color:#f97316;'>{active_leads}</div><div class='small-muted'>In Progress</div></div>""", unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # ---------- STAGE CARDS (clicking a stage filters to that stage) ----------
-    st.markdown("### 📈 Pipeline Stages (click a card to filter)")
+    # ---------- PIPELINE STAGES ----------
+    st.markdown("### 📈 Pipeline Stages")
     stage_colors = {
         LeadStatus.NEW: "#2563eb",
         LeadStatus.CONTACTED: "#eab308",
@@ -1004,77 +594,65 @@ elif page == "Pipeline Board":
         LeadStatus.INSPECTION_COMPLETED: "#14b8a6",
         LeadStatus.ESTIMATE_SUBMITTED: "#a855f7",
         LeadStatus.AWARDED: "#22c55e",
-        LeadStatus.LOST: "#ef4444",
+        LeadStatus.LOST: "#ef4444"
     }
+    stage_counts = df["status"].value_counts().to_dict()
 
-    stage_counts = df["status"].value_counts().to_dict() if "status" in df else {}
-    stage_cols = st.columns(len(LeadStatus.ALL))
-    for idx, stage in enumerate(LeadStatus.ALL):
-        count = stage_counts.get(stage, 0)
-        pct = (count / total_leads * 100) if total_leads else 0
-        color = stage_colors.get(stage, "#ffffff")
-
-        with stage_cols[idx]:
-            # make stage card clickable: use button that sets session_state filter
-            if st.button(f"{stage} — {count}", key=f"stage_btn_{idx}"):
-                st.session_state.pipeline_stage_filter = stage
+    # clickable stage cards (one column per stage)
+    cols = st.columns(len(LeadStatus.ALL))
+    for i, stage in enumerate(LeadStatus.ALL):
+        cnt = stage_counts.get(stage, 0)
+        pct = (cnt / total_leads * 100) if total_leads else 0
+        color = stage_colors.get(stage, "#fff")
+        with cols[i]:
+            btn_key = f"stage_btn_{i}"
+            # create a tiny html button area — but use st.button for interaction
+            if st.button(f"{stage} ({cnt})", key=btn_key):
+                # toggle filter
+                if st.session_state.pipeline_stage_filter == stage:
+                    st.session_state.pipeline_stage_filter = None
+                else:
+                    st.session_state.pipeline_stage_filter = stage
                 st.experimental_rerun()
-
-            # visual progress
-            st.markdown(
-                f"""
-                <div class='metric-card stage-card' style='text-align:center;'>
-                    <div class='metric-label'>{stage}</div>
-                    <div class='metric-value' style='color:{color};'>{count}</div>
+            st.markdown(f"""
+                <div style='margin-top:6px;'>
                     <div class='progress-bar'><div class='progress-fill' style='background:{color}; width:{pct}%;'></div></div>
-                    <div style='font-size:12px; color:#93a0ad; margin-top:6px;'>{pct:.1f}%</div>
+                    <div style='text-align:center; color:#93a0ad; margin-top:6px;'>{pct:.1f}%</div>
                 </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            """, unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # ---------- Apply filters (stage & quick search) ----------
-    df_filtered = df.copy()
-    # stage filter from session
-    if st.session_state.pipeline_stage_filter:
-        df_filtered = df_filtered[df_filtered["status"] == st.session_state.pipeline_stage_filter]
-    # quick search across name, address, damage_type
-    q = st.session_state.get("pipeline_quick_search", "").lower()
-    if q:
-        mask = pd.Series(False, index=df_filtered.index)
-        for col in ["contact_name", "property_address", "damage_type"]:
-            if col in df_filtered:
-                mask = mask | df_filtered[col].fillna("").str.lower().str.contains(q)
-        df_filtered = df_filtered[mask]
-
-    # ---------- PRIORITY LEADS (top 8) with SLA badges and move-status control ----------
+    # ---------- PRIORITY LEADS (with filtering) ----------
     st.markdown("### 🎯 Priority Leads (Top 8)")
 
+    # Build priority list
     priority_items = []
-    for _, row in df_filtered.iterrows():
-        score, _, _, _, _, _, time_left = compute_priority_for_lead_row(row, weights)
+    for _, row in df.iterrows():
+        score, _, _, _, _, _, _ = compute_priority_for_lead_row(row, weights)
 
-        # SLA
+        # SLA calculation (robust)
         sla_entered = row.get("sla_entered_at") or row.get("created_at")
-        try:
-            sla_dt = pd.to_datetime(sla_entered)
-        except Exception:
-            sla_dt = datetime.utcnow()
-        sla_hours = int(row.get("sla_hours") or 24)
-        deadline = sla_dt + timedelta(hours=sla_hours)
-        remaining_secs = (deadline - datetime.utcnow()).total_seconds()
-        overdue = remaining_secs <= 0
-        hours_left = max(int(remaining_secs // 3600), 0)
-        mins_left = max(int((remaining_secs % 3600) // 60), 0)
+        if isinstance(sla_entered, str):
+            try:
+                sla_entered = datetime.fromisoformat(sla_entered)
+            except:
+                sla_entered = datetime.utcnow()
+        else:
+            if pd.isna(sla_entered):
+                sla_entered = datetime.utcnow()
 
-        # prediction (safe)
+        sla_hours = int(row.get("sla_hours") or 24)
+        deadline = sla_entered + timedelta(hours=sla_hours)
+        remaining = (deadline - datetime.utcnow()).total_seconds()
+        overdue = remaining <= 0
+        hours_left = max(int(remaining // 3600), 0)
+
         prob = None
         if lead_model is not None:
             try:
                 prob = predict_lead_probability(lead_model, row)
-            except Exception:
+            except:
                 prob = None
 
         priority_items.append({
@@ -1084,14 +662,16 @@ elif page == "Pipeline Board":
             "score": score,
             "status": row.get("status"),
             "overdue": overdue,
-            "hours_left": hours_left,
-            "mins_left": mins_left,
+            "time_left": hours_left,
             "prob": prob,
-            "damage": row.get("damage_type") or "Unknown",
-            "row": row,
+            "damage": row.get("damage_type") or "Unknown"
         })
 
     pr_df = pd.DataFrame(priority_items).sort_values("score", ascending=False)
+
+    # apply filter if selected
+    if st.session_state.pipeline_stage_filter:
+        pr_df = pr_df[pr_df["status"] == st.session_state.pipeline_stage_filter]
 
     if pr_df.empty:
         st.info("No priority leads to display.")
@@ -1099,131 +679,126 @@ elif page == "Pipeline Board":
         for _, r in pr_df.head(8).iterrows():
             color = "#ef4444" if r["score"] >= 0.7 else ("#f97316" if r["score"] >= 0.45 else "#22c55e")
             label = "🔴 CRITICAL" if r["score"] >= 0.7 else ("🟠 HIGH" if r["score"] >= 0.45 else "🟢 NORMAL")
-            status_color = stage_colors.get(r["status"], "#ffffff")
-
-            sla_html = (f"<span class='sla-badge' style='background:#ef444420;color:#ef4444;'>❗ OVERDUE</span>"
-                        if r["overdue"] else f"<span class='sla-badge' style='background:#2563eb20;color:#2563eb;'>⏳ {r['hours_left']}h {r['mins_left']}m</span>")
-
+            status_color = stage_colors.get(r["status"], "#fff")
+            sla_html = "<span style='color:#ef4444;'>❗ OVERDUE</span>" if r["overdue"] else f"<span style='color:#2563eb;'>⏳ {r['time_left']}h left</span>"
             conv_html = ""
             if r["prob"] is not None:
                 pct = int(r["prob"] * 100)
                 conv_color = "#22c55e" if pct > 70 else ("#f97316" if pct > 40 else "#ef4444")
-                conv_html = f"<span style='margin-left:10px;color:{conv_color};font-weight:700;'>📊 {pct}% Win</span>"
+                conv_html = f"<span style='margin-left:10px; color:{conv_color};'>📊 {pct}% Win</span>"
 
-            st.markdown(
-                f"""
-                <div class='priority-card'>
-                    <div style='display:flex;justify-content:space-between;align-items:center;'>
-                        <div style='flex:1;'>
-                            <div style='margin-bottom:8px;'>
-                                <span style='color:{color};font-weight:700;font-size:13px;'>{label}</span>
-                                <span class='stage-badge' style='background:{status_color}30;color:{status_color};border:1px solid {status_color}40;'>{r['status']}</span>
-                            </div>
-                            <div style='font-size:16px;font-weight:700;'>#{r['id']} — {r['name']}</div>
-                            <div style='color:#93a0ad;font-size:13px;margin-top:6px;'>{r['damage'].title()} | Est: <span style='color:#22c55e;font-weight:700;'>${r['value']:,.0f}</span></div>
-                            <div style='margin-top:8px;font-size:13px;'>{sla_html} {conv_html}</div>
-                        </div>
-                        <div style='text-align:right;padding-left:18px;'>
-                            <div style='font-size:32px;font-weight:700;color:{color};'>{r['score']:.2f}</div>
-                            <div style='font-size:11px;color:#93a0ad;'>Priority</div>
-                        </div>
+            st.markdown(f"""
+            <div class='priority-card'>
+                <div style='display:flex; justify-content:space-between;'>
+                    <div>
+                        <div><b style='color:{color};'>{label}</b> <span class='stage-badge' style='background:{status_color}20; color:{status_color}; border:1px solid {status_color}40;'>{r['status']}</span></div>
+                        <div style='font-size:18px; font-weight:700; margin-top:6px;'>#{r['id']} — {r['name']}</div>
+                        <div class='small-muted'>{r['damage'].title()} | Est: <span style='color:#22c55e; font-weight:700;'>{format_currency(r['value'])}</span></div>
+                        <div style='margin-top:6px; font-size:13px;'>{sla_html} {conv_html}</div>
                     </div>
-
-                    <!-- Inline actions: quick-change status form -->
-                    <div style='margin-top:10px; display:flex; gap:8px;'>
-                    """
-            , unsafe_allow_html=True)
-
-            # Inline status change (safe, no drag-and-drop)
-            cols = st.columns([2, 1, 1, 1, 3])
-            with cols[0]:
-                new_status = st.selectbox(f"Move #{r['id']} to", LeadStatus.ALL, index=LeadStatus.ALL.index(r["status"]) if r["status"] in LeadStatus.ALL else 0, key=f"move_status_{r['id']}")
-            with cols[1]:
-                if st.button("Move", key=f"move_btn_{r['id']}"):
-                    s_db = get_session()
-                    lead_db = s_db.query(Lead).filter(Lead.id == r["id"]).first()
-                    if lead_db:
-                        lead_db.status = new_status
-                        if new_status == LeadStatus.INSPECTION_SCHEDULED:
-                            lead_db.inspection_scheduled = True
-                            lead_db.inspection_scheduled_at = datetime.utcnow()
-                        s_db.add(lead_db)
-                        s_db.commit()
-                        st.success(f"Lead #{r['id']} moved to {new_status}")
-                        st.experimental_rerun()
-            with cols[2]:
-                if st.button("Open", key=f"open_{r['id']}"):
-                    # set session filter and scroll to lead in All Leads below (approximate)
-                    st.session_state.pipeline_stage_filter = None
-                    st.experimental_rerun()
-            with cols[3]:
-                if st.button("Call", key=f"call_{r['id']}"):
-                    # no-op UI action; could open tel: link if desired
-                    st.info(f"Dial action for {r['name']} (not implemented in preview)")
-            with cols[4]:
-                st.write("")  # spacer
-
-            st.markdown("</div></div>", unsafe_allow_html=True)
+                    <div style='text-align:right;'>
+                        <div style='font-size:36px; font-weight:700; color:{color};'>{r['score']:.2f}</div>
+                        <div style='font-size:11px; color:#93a0ad;'>Priority</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # ---------- ALL LEADS (expandable) ----------
-    st.markdown("### 📋 All Leads (expand to edit)")
+    # ---------- EXPANDABLE LEAD CARDS with lightweight Kanban actions ----------
+    st.markdown("### 📋 All Leads")
+    # optionally filter main list by stage
+    lead_rows = df.copy()
+    if st.session_state.pipeline_stage_filter:
+        lead_rows = lead_rows[lead_rows["status"] == st.session_state.pipeline_stage_filter]
 
-    # show summary table first for quick glance (clickable row opens edit)
-    display_cols = ["id", "contact_name", "status", "estimated_value", "assigned_to", "created_at"]
-    display_cols = [c for c in display_cols if c in df.columns]
-    st.dataframe(df_filtered[display_cols].sort_values("created_at", ascending=False).head(200))
-
-    # Expandable detailed cards (editable)
-    for lead in s.query(Lead).order_by(Lead.created_at.desc()).all():
-        # apply stage filter or quick search if active
-        if st.session_state.pipeline_stage_filter and lead.status != st.session_state.pipeline_stage_filter:
-            continue
-        if st.session_state.pipeline_quick_search:
-            qv = st.session_state.pipeline_quick_search.lower()
-            if qv not in (lead.contact_name or "").lower() and qv not in (lead.property_address or "").lower() and qv not in (lead.damage_type or "").lower():
-                continue
-
-        card_label = f"#{lead.id} — {lead.contact_name or 'No name'} — {lead.damage_type or 'Unknown'} — {format_currency(lead.estimated_value or 0)}"
-        with st.expander(card_label, expanded=False):
+    for _, lead_row in lead_rows.sort_values("created_at", ascending=False).iterrows():
+        lead_id = int(lead_row["id"])
+        lead_obj = s.query(Lead).filter(Lead.id == lead_id).first()
+        status_color = stage_colors.get(lead_row["status"], "#fff")
+        est_val = lead_row.get("estimated_value") or 0.0
+        title = f"#{lead_id} — {lead_row.get('contact_name') or 'No name'} — {lead_row.get('damage_type') or 'Unknown'} — {format_currency(est_val)}"
+        with st.expander(title, expanded=False):
             colA, colB = st.columns([3, 1])
             with colA:
-                st.write(f"**Source:** {lead.source or '—'}  •  **Assigned:** {lead.assigned_to or '—'}")
-                st.write(f"**Address:** {lead.property_address or '—'}")
-                st.write(f"**Notes:** {lead.notes or '—'}")
-                st.write(f"**Created:** {lead.created_at}")
+                st.markdown(f"**Source:** {lead_row.get('source') or '—'}  ·  **Assigned:** {lead_row.get('assigned_to') or '—'}")
+                st.markdown(f"**Address:** {lead_row.get('property_address') or '—'}")
+                st.markdown(f"**Notes:** {lead_row.get('notes') or '—'}")
+                st.markdown(f"**Created:** {pd.to_datetime(lead_row.get('created_at'))}")
             with colB:
-                entered = lead.sla_entered_at or lead.created_at
+                entered = lead_row.get("sla_entered_at") or lead_row.get("created_at")
                 try:
-                    entered_dt = pd.to_datetime(entered)
+                    if isinstance(entered, str):
+                        entered = datetime.fromisoformat(entered)
+                    elif pd.isna(entered):
+                        entered = datetime.utcnow()
                 except:
-                    entered_dt = datetime.utcnow()
-                deadline = entered_dt + timedelta(hours=(lead.sla_hours or 24))
-                remaining_secs = (deadline - datetime.utcnow()).total_seconds()
-                if remaining_secs <= 0:
-                    st.markdown("<div style='color:#ef4444;font-weight:700;'>❗ SLA OVERDUE</div>", unsafe_allow_html=True)
+                    entered = datetime.utcnow()
+                deadline = entered + timedelta(hours=int(lead_row.get("sla_hours") or 24))
+                remaining = (deadline - datetime.utcnow()).total_seconds()
+                if remaining <= 0:
+                    st.markdown(f"<div style='color:{'#ef4444'}; font-weight:700;'>❗ OVERDUE</div>", unsafe_allow_html=True)
                 else:
-                    h = int(remaining_secs // 3600)
-                    m = int((remaining_secs % 3600) // 60)
-                    st.markdown(f"<div style='color:#2563eb;font-weight:700;'>⏳ {h}h {m}m left</div>", unsafe_allow_html=True)
+                    hrs = int(remaining // 3600)
+                    mins = int((remaining % 3600) // 60)
+                    st.markdown(f"<div style='color:#2563eb;'>⏳ {hrs}h {mins}m</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='stage-badge' style='background:{status_color}20; color:{status_color}; border:1px solid {status_color}40;'>{lead_row.get('status')}</div>", unsafe_allow_html=True)
+
+            # Quick actions: move left / move right through LeadStatus.ALL
+            move_cols = st.columns([1,1,3,3])
+            with move_cols[0]:
+                if st.button("◀ Move Left", key=f"move_left_{lead_id}"):
+                    try:
+                        cur_idx = LeadStatus.ALL.index(lead_obj.status)
+                        new_idx = max(0, cur_idx - 1)
+                        lead_obj.status = LeadStatus.ALL[new_idx]
+                        s.add(lead_obj); s.commit()
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+            with move_cols[1]:
+                if st.button("Move Right ▶", key=f"move_right_{lead_id}"):
+                    try:
+                        cur_idx = LeadStatus.ALL.index(lead_obj.status)
+                        new_idx = min(len(LeadStatus.ALL)-1, cur_idx + 1)
+                        lead_obj.status = LeadStatus.ALL[new_idx]
+                        s.add(lead_obj); s.commit()
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+            with move_cols[2]:
+                if st.button("📞 Call", key=f"call_{lead_id}"):
+                    # link cannot be directly opened from backend; show phone
+                    st.warning(f"Call {lead_row.get('contact_phone') or 'No phone on record'}")
+            with move_cols[3]:
+                if st.button("✉️ Email", key=f"email_{lead_id}"):
+                    st.info(f"Send email to: {lead_row.get('contact_email') or 'No email on record'}")
 
             st.markdown("---")
-            # quick edit form inside each card
-            with st.form(f"edit_lead_form_{lead.id}"):
-                st.selectbox("Status", LeadStatus.ALL, index=LeadStatus.ALL.index(lead.status) if lead.status in LeadStatus.ALL else 0, key=f"card_status_{lead.id}")
-                st.text_input("Assigned to", value=lead.assigned_to or "", key=f"card_assign_{lead.id}")
-                if st.form_submit_button("Save changes"):
-                    s_db = get_session()
-                    lead_db = s_db.query(Lead).filter(Lead.id == lead.id).first()
+            # Update form
+            with st.form(f"update_lead_form_{lead_id}"):
+                new_status = st.selectbox("Status", LeadStatus.ALL, index=LeadStatus.ALL.index(lead_obj.status) if lead_obj.status in LeadStatus.ALL else 0, key=f"status_sel_{lead_id}")
+                new_assigned = st.text_input("Assigned to", value=lead_obj.assigned_to or "", key=f"assign_{lead_id}")
+                new_est = st.number_input("Estimate amount ($)", min_value=0.0, value=lead_obj.estimated_value or 0.0, step=50.0, key=f"est_{lead_id}")
+                contacted = st.checkbox("Contacted", value=bool(lead_obj.contacted), key=f"contacted_{lead_id}")
+                inspection_sched = st.checkbox("Inspection scheduled", value=bool(lead_obj.inspection_scheduled), key=f"inspsch_{lead_id}")
+                notes_txt = st.text_area("Notes", value=lead_obj.notes or "", key=f"notes_{lead_id}")
+                if st.form_submit_button("Save changes", key=f"save_{lead_id}"):
+                    lead_db = s.query(Lead).filter(Lead.id == lead_id).first()
                     if lead_db:
-                        lead_db.status = st.session_state.get(f"card_status_{lead.id}", lead.status)
-                        lead_db.assigned_to = st.session_state.get(f"card_assign_{lead.id}", lead.assigned_to)
-                        s_db.add(lead_db)
-                        s_db.commit()
-                        st.success(f"Lead #{lead.id} updated")
-                        st.experimental_rerun()
+                        lead_db.status = new_status
+                        lead_db.assigned_to = new_assigned
+                        lead_db.estimated_value = float(new_est) if new_est else None
+                        lead_db.contacted = bool(contacted)
+                        lead_db.inspection_scheduled = bool(inspection_sched)
+                        lead_db.notes = notes_txt
+                        s.add(lead_db); s.commit()
+                    st.success("Lead updated")
+                    st.experimental_rerun()
 
+# ========== End of Pipeline Board replacement ==========
+# Continue with Analytics & SLA and Exports pages below
 
 # --- Page: Analytics & SLA
 elif page == "Analytics & SLA":
@@ -1236,7 +811,7 @@ elif page == "Analytics & SLA":
         funnel = df.groupby("status").size().reindex(LeadStatus.ALL, fill_value=0).reset_index()
         funnel.columns = ["stage", "count"]
         st.subheader("Funnel Overview")
-        colors = ["#2563eb", "#f9ab00", "#fb8c00", "#00acc1", "#9334e6", "#0f9d58", "#ea4335"]
+        colors = ["#2563eb", "#f9ab00", "#f97316", "#14b8a6", "#a855f7", "#22c55e", "#ef4444"]
         fig = px.bar(funnel, x="stage", y="count", title="Leads by Stage", text="count", color="stage", color_discrete_sequence=colors[:len(funnel)])
         fig.update_layout(xaxis_title=None, yaxis_title="Number of Leads", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
