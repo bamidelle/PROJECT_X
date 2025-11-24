@@ -534,8 +534,9 @@ if page == "Leads / Capture":
 
 # --- Page: Pipeline Board (UPGRADED)
 elif page == "Pipeline Board":
-    st.header("🧭 Pipeline Dashboard")
+    st.header("🧭 Pipeline Dashboard (Google Ads Style + Auto Updates)")
 
+    # Database session
     s = get_session()
     leads = s.query(Lead).order_by(Lead.created_at.desc()).all()
 
@@ -546,104 +547,225 @@ elif page == "Pipeline Board":
     df = leads_df(s)
     weights = st.session_state.weights
 
+    # Load ML model safely
     try:
-        lead_model = joblib.load("lead_conversion_model.pkl")
+        lead_model = joblib.load("lead_conversion_model.pkl") if os.path.exists("lead_conversion_model.pkl") else None
     except:
         lead_model = None
 
-    # ---------- GOOGLE ADS UI STYLE ----------
+    # --------------------------
+    # Session-State for Filters
+    # --------------------------
+    if "pipeline_stage_filter" not in st.session_state:
+        st.session_state.pipeline_stage_filter = None  # Show all by default
+    if "pipeline_autorefresh" not in st.session_state:
+        st.session_state.pipeline_autorefresh = True
+    if "pipeline_autorefresh_ms" not in st.session_state:
+        st.session_state.pipeline_autorefresh_ms = 30000  # 30s refresh
+
+    # Auto refresh UI
+    if st.session_state.pipeline_autorefresh:
+        st.experimental_rerun()
+
+    # --------------------------
+    # GOOGLE ADS STYLE CSS
+    # --------------------------
     st.markdown("""
     <style>
-    .metric-card {
-        background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%);
-        border-radius: 12px;
-        padding: 20px;
-        margin: 10px 0;
-        border: 1px solid rgba(255,255,255,0.08);
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
-        transition: 0.2s;
-    }
-    .metric-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 12px rgba(0,0,0,0.4);
-    }
-    .metric-label { font-size:13px; color:#93a0ad; text-transform:uppercase; }
-    .metric-value { font-size:32px; font-weight:700; margin-top:6px; }
-    .metric-change { 
-        font-size:13px; padding:4px 8px; border-radius:6px; font-weight:600; 
-    }
-    .positive { background:rgba(34,197,94,0.2); color:#22c55e;}
-    .negative { background:rgba(239,68,68,0.2); color:#ef4444;}
-
-    .stage-card { margin-top:12px; }
-    .progress-bar {
-        width:100%; height:8px; background:rgba(255,255,255,0.1);
-        border-radius:4px; overflow:hidden; margin-top:10px;
-    }
-    .progress-fill { height:100%; border-radius:4px; transition:0.3s; }
-
-    .priority-card { margin:10px 0; padding:18px; border-radius:12px;
-        background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.05);
-    }
-    .stage-badge {
-        padding:6px 12px; border-radius:20px; font-size:12px; font-weight:600;
-        margin-left:10px;
-    }
+        .metric-card {
+            background: linear-gradient(135deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.02) 100%);
+            border-radius: 14px;
+            padding: 20px;
+            margin: 12px 0;
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.35);
+            transition: transform 0.25s ease, box-shadow 0.25s ease;
+        }
+        .metric-card:hover {
+            transform: scale(1.02);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.45);
+        }
+        .stage-card-click {
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .stage-card-click:hover {
+            opacity: 0.85;
+            transform: translateY(-3px);
+        }
+        .progress-bar {
+            height: 8px;
+            background: rgba(255,255,255,0.12);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            transition: width 0.4s ease;
+        }
     </style>
     """, unsafe_allow_html=True)
 
-    # ---------- KPI METRICS ----------
+    # --------------------------
+    # BASIC METRICS
+    # --------------------------
     total_leads = len(df)
     qualified_leads = len(df[df["qualified"] == True])
-    total_value = df["estimated_value"].sum() if "estimated_value" in df else 0
-    awarded_count = len(df[df["status"] == LeadStatus.AWARDED])
-    lost_count = len(df[df["status"] == LeadStatus.LOST])
-    closed_total = awarded_count + lost_count
-    conversion_rate = (awarded_count / closed_total * 100) if closed_total else 0
-    active_leads = total_leads - closed_total
+    awarded_leads = len(df[df["status"] == LeadStatus.AWARDED])
+    lost_leads = len(df[df["status"] == LeadStatus.LOST])
+    total_value = df["estimated_value"].sum()
 
-    st.markdown("### 📊 Key Performance Indicators")
+    closed = awarded_leads + lost_leads
+    conversion_rate = (awarded_leads / closed * 100) if closed > 0 else 0
+    active = total_leads - closed
+
+    # --------------------------
+    # METRIC CARDS
+    # --------------------------
+    st.subheader("📊 Key Performance Indicators")
+
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
         st.markdown(f"""
-        <div class='metric-card'>
-            <div class='metric-label'>Total Leads</div>
-            <div class='metric-value' style='color:#2563eb;'>{total_leads}</div>
-            <div class='metric-change positive'>↑ {qualified_leads} Qualified</div>
+        <div class="metric-card">
+            <div style="color:#9ca3af;font-size:12px;">Total Leads</div>
+            <div style="font-size:32px;font-weight:700;color:#2563eb;">{total_leads}</div>
+            <div style="color:#22c55e;">↑ {qualified_leads} Qualified</div>
         </div>
         """, unsafe_allow_html=True)
 
     with col2:
         st.markdown(f"""
-        <div class='metric-card'>
-            <div class='metric-label'>Pipeline Value</div>
-            <div class='metric-value' style='color:#22c55e;'>${total_value:,.0f}</div>
-            <div class='metric-change positive'>Active</div>
+        <div class="metric-card">
+            <div style="color:#9ca3af;font-size:12px;">Pipeline Value</div>
+            <div style="font-size:32px;font-weight:700;color:#22c55e;">${total_value:,.0f}</div>
+            <div style="color:#22c55e;">↑ Active</div>
         </div>
         """, unsafe_allow_html=True)
 
     with col3:
         st.markdown(f"""
-        <div class='metric-card'>
-            <div class='metric-label'>Conversion Rate</div>
-            <div class='metric-value' style='color:#a855f7;'>{conversion_rate:.1f}%</div>
-            <div class='metric-change {'positive' if conversion_rate>50 else 'negative'}'>
-                {awarded_count}/{closed_total} Won
+        <div class="metric-card">
+            <div style="color:#9ca3af;font-size:12px;">Conversion Rate</div>
+            <div style="font-size:32px;font-weight:700;color:#a855f7;">{conversion_rate:.1f}%</div>
+            <div style="color:{'#22c55e' if conversion_rate>50 else '#ef4444'};">
+                {awarded_leads}/{closed} Won
             </div>
         </div>
         """, unsafe_allow_html=True)
 
     with col4:
         st.markdown(f"""
-        <div class='metric-card'>
-            <div class='metric-label'>Active Leads</div>
-            <div class='metric-value' style='color:#f97316;'>{active_leads}</div>
-            <div class='metric-change positive'>In Progress</div>
+        <div class="metric-card">
+            <div style="color:#9ca3af;font-size:12px;">Active Leads</div>
+            <div style="font-size:32px;font-weight:700;color:#f97316;">{active}</div>
+            <div>In Progress</div>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("---")
+
+    # --------------------------
+    # STAGE CARDS (CLICKABLE)
+    # --------------------------
+    st.subheader("📈 Pipeline Stages (Click to Filter)")
+
+    stage_counts = df["status"].value_counts().to_dict()
+    stage_colors = {
+        LeadStatus.NEW: "#2563eb",
+        LeadStatus.CONTACTED: "#eab308",
+        LeadStatus.INSPECTION_SCHEDULED: "#f97316",
+        LeadStatus.INSPECTION_COMPLETED: "#14b8a6",
+        LeadStatus.ESTIMATE_SUBMITTED: "#a855f7",
+        LeadStatus.AWARDED: "#22c55e",
+        LeadStatus.LOST: "#ef4444"
+    }
+
+    cols = st.columns(len(LeadStatus.ALL))
+
+    for i, stg in enumerate(LeadStatus.ALL):
+        count = stage_counts.get(stg, 0)
+        pct = (count / total_leads * 100) if total_leads else 0
+        color = stage_colors[stg]
+
+        with cols[i]:
+            if st.button(stg, key=f"stg_btn_{stg}"):
+                st.session_state.pipeline_stage_filter = stg
+
+            st.markdown(f"""
+            <div class="metric-card stage-card-click">
+                <div style="color:#9ca3af;font-size:12px;">{stg}</div>
+                <div style="font-size:24px;font-weight:700;color:{color};">{count}</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="background:{color}; width:{pct}%;"></div>
+                </div>
+                <div style="text-align:center;color:#9ca3af;font-size:12px;margin-top:6px;">
+                    {pct:.1f}%
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Apply filter if selected
+    if st.session_state.pipeline_stage_filter:
+        df = df[df["status"] == st.session_state.pipeline_stage_filter]
+
+    # --------------------------
+    # PRIORITY ENGINE
+    # --------------------------
+    st.subheader("🎯 Priority Leads")
+
+    priority_list = []
+
+    for _, row in df.iterrows():
+        score, *_ = compute_priority_for_lead_row(row, weights)
+
+        sla_entered = row.get("sla_entered_at") or row.get("created_at")
+        if isinstance(sla_entered, str):
+            try: sla_entered = datetime.fromisoformat(sla_entered)
+            except: sla_entered = datetime.utcnow()
+
+        deadline = sla_entered + timedelta(hours=int(row.get("sla_hours") or 24))
+        remaining = deadline - datetime.utcnow()
+        overdue = remaining.total_seconds() <= 0
+
+        # Model prediction
+        prob = None
+        if lead_model is not None:
+            try:
+                prob = predict_lead_probability(lead_model, row)
+            except:
+                prob = None
+
+        priority_list.append({
+            "id": int(row["id"]),
+            "contact_name": row.get("contact_name"),
+            "status": row.get("status"),
+            "estimated_value": float(row.get("estimated_value") or 0),
+            "priority_score": score,
+            "sla_overdue": overdue,
+            "time_left_hours": remaining.total_seconds() / 3600,
+            "conversion_prob": prob
+        })
+
+    pr_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
+
+    if pr_df.empty:
+        st.info("No leads available.")
+    else:
+        for _, r in pr_df.head(6).iterrows():
+            color = "#ef4444" if r["priority_score"] >= 0.7 else "#f97316" if r["priority_score"] >= 0.45 else "#22c55e"
+            st.markdown(f"""
+            <div class="metric-card">
+                <div style="font-size:18px;font-weight:700;color:{color};">Priority {r['priority_score']:.2f}</div>
+                <div style="color:#fff;">#{r["id"]} — {r["contact_name"]}</div>
+                <div style="color:#9ca3af;font-size:13px;">Est: ${r["estimated_value"]:,.0f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
 
     # ---------- PIPELINE STAGES ----------
     st.markdown("### 📈 Pipeline Stages")
