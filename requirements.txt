@@ -1,5 +1,8 @@
 streamlit
 pandas
-plotly
-SQLAlchemy
+numpy
+sqlalchemy
 python-dateutil
+pytz
+joblib
+scikit-learn
