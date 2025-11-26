@@ -1,358 +1,877 @@
-# =================== BEGIN FULL APP CODE ===================
+# project_x_singlefile_app.py
+"""
+Project X — Single-file Streamlit app (Option A)
+- Single file (SQLite + SQLAlchemy)
+- Pipeline Dashboard redesigned: 2 rows x 4 columns KPI cards,
+  glassy grey/black pipeline area, priority top-8, award invoice upload.
+- White app background overall. Pipeline uses glassy rounded cards.
+"""
+
+import os
+from datetime import datetime, timedelta
+import tempfile
+import traceback
 
 import streamlit as st
-from datetime import datetime, timedelta
-import os
-import sqlite3
 import pandas as pd
-import matplotlib.pyplot as plt
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
-from sqlalchemy.orm import declarative_base, sessionmaker
+import plotly.express as px
 
-# ---------- Database Setup ----------
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, inspect
+)
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+
+# Optional joblib import (guarded)
+try:
+    import joblib
+except Exception:
+    joblib = None
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+DB_FILE = os.getenv("PROJECT_X_DB", "project_x_singlefile.db")
+DATABASE_URL = f"sqlite:///{DB_FILE}"
+MODEL_PATH = "lead_conversion_model.pkl"
+UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploaded_files")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 Base = declarative_base()
-DB_FILE = "leads.db"
-engine = create_engine(f"sqlite:///{DB_FILE}")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 
-# ---------- Lead Status ----------
+# ---------------------------
+# Lead statuses
+# ---------------------------
 class LeadStatus:
     NEW = "New"
-    ACTIVE = "Active"
-    QUALIFIED = "Qualified"
+    CONTACTED = "Contacted"
+    INSPECTION_SCHEDULED = "Inspection Scheduled"
+    INSPECTION_COMPLETED = "Inspection Completed"
     ESTIMATE_SUBMITTED = "Estimate Submitted"
     AWARDED = "Awarded"
     LOST = "Lost"
 
-    ALL = [NEW, ACTIVE, QUALIFIED, ESTIMATE_SUBMITTED, AWARDED, LOST]
+    ALL = [
+        NEW,
+        CONTACTED,
+        INSPECTION_SCHEDULED,
+        INSPECTION_COMPLETED,
+        ESTIMATE_SUBMITTED,
+        AWARDED,
+        LOST
+    ]
 
-# ---------- Database Models ----------
+# ---------------------------
+# MODELS
+# ---------------------------
 class Lead(Base):
     __tablename__ = "leads"
     id = Column(Integer, primary_key=True)
-    contact_name = Column(String)
-    contact_phone = Column(String)
-    contact_email = Column(String)
-    property_address = Column(String)
-    damage_type = Column(String)
-    assigned_to = Column(String)
-    estimated_value = Column(Float, default=0.0)
-    notes = Column(String)
+    source = Column(String, default="Unknown")
+    source_details = Column(String, nullable=True)
+    contact_name = Column(String, nullable=True)
+    contact_phone = Column(String, nullable=True)
+    contact_email = Column(String, nullable=True)
+    property_address = Column(String, nullable=True)
+    damage_type = Column(String, nullable=True)
+    assigned_to = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    estimated_value = Column(Float, nullable=True)
     status = Column(String, default=LeadStatus.NEW)
-    sla_hours = Column(Integer, default=24)
-    sla_entered_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
-    qualified = Column(Boolean, default=True)
-    invoice_path = Column(String, nullable=True)
+
+    # SLA
+    sla_hours = Column(Integer, default=24)
+    sla_entered_at = Column(DateTime, nullable=True)
+
+    # flags
+    contacted = Column(Boolean, default=False)
+    inspection_scheduled = Column(Boolean, default=False)
+    inspection_scheduled_at = Column(DateTime, nullable=True)
+    inspection_completed = Column(Boolean, default=False)
+    inspection_completed_at = Column(DateTime, nullable=True)
+    estimate_submitted = Column(Boolean, default=False)
+    estimate_submitted_at = Column(DateTime, nullable=True)
+
+    # Awarded/Lost
+    awarded_comment = Column(Text, nullable=True)
+    awarded_date = Column(DateTime, nullable=True)
+    awarded_invoice = Column(String, nullable=True)
+    lost_comment = Column(Text, nullable=True)
+    lost_date = Column(DateTime, nullable=True)
+
+    qualified = Column(Boolean, default=False)
+
 
 class Estimate(Base):
     __tablename__ = "estimates"
     id = Column(Integer, primary_key=True)
-    lead_id = Column(Integer)
+    lead_id = Column(Integer, nullable=False)
     amount = Column(Float, default=0.0)
-    sent_at = Column(DateTime, nullable=True)
+    details = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
     approved = Column(Boolean, default=False)
     lost = Column(Boolean, default=False)
-    lost_reason = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
 
-# ---------- DB Init ----------
+
+# ---------------------------
+# DB init + safe migration helper
+# ---------------------------
+MIGRATION_COLUMNS = {
+    "contacted": "INTEGER DEFAULT 0",
+    "inspection_scheduled": "INTEGER DEFAULT 0",
+    "inspection_scheduled_at": "TEXT",
+    "inspection_completed": "INTEGER DEFAULT 0",
+    "inspection_completed_at": "TEXT",
+    "estimate_submitted": "INTEGER DEFAULT 0",
+    "estimate_submitted_at": "TEXT",
+    "awarded_comment": "TEXT",
+    "awarded_date": "TEXT",
+    "awarded_invoice": "TEXT",
+    "lost_comment": "TEXT",
+    "lost_date": "TEXT",
+    "qualified": "INTEGER DEFAULT 0"
+}
+
+def create_tables_and_migrate():
+    Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    if "leads" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("leads")}
+    conn = engine.connect()
+    for col, def_sql in MIGRATION_COLUMNS.items():
+        if col not in existing_cols:
+            try:
+                conn.execute(f"ALTER TABLE leads ADD COLUMN {col} {def_sql};")
+            except Exception:
+                pass
+    conn.close()
+
 def init_db():
-    Base.metadata.create_all(engine)
+    create_tables_and_migrate()
 
+# ---------------------------
+# DB helpers (CRUD)
+# ---------------------------
 def get_session():
     return SessionLocal()
 
+def add_lead(session, **kwargs):
+    lead = Lead(
+        source=kwargs.get("source"),
+        source_details=kwargs.get("source_details"),
+        contact_name=kwargs.get("contact_name"),
+        contact_phone=kwargs.get("contact_phone"),
+        contact_email=kwargs.get("contact_email"),
+        property_address=kwargs.get("property_address"),
+        damage_type=kwargs.get("damage_type"),
+        status=LeadStatus.NEW,
+        assigned_to=kwargs.get("assigned_to"),
+        estimated_value=kwargs.get("estimated_value"),
+        notes=kwargs.get("notes"),
+        sla_hours=kwargs.get("sla_hours", 24),
+        sla_entered_at=kwargs.get("sla_entered_at") or datetime.utcnow(),
+        contacted=kwargs.get("contacted", False),
+        inspection_scheduled=kwargs.get("inspection_scheduled", False),
+        inspection_scheduled_at=kwargs.get("inspection_scheduled_at"),
+        inspection_completed=kwargs.get("inspection_completed", False),
+        inspection_completed_at=kwargs.get("inspection_completed_at"),
+        estimate_submitted=kwargs.get("estimate_submitted", False),
+        estimate_submitted_at=kwargs.get("estimate_submitted_at"),
+        awarded_comment=kwargs.get("awarded_comment"),
+        awarded_date=kwargs.get("awarded_date"),
+        awarded_invoice=kwargs.get("awarded_invoice"),
+        lost_comment=kwargs.get("lost_comment"),
+        lost_date=kwargs.get("lost_date"),
+        qualified=kwargs.get("qualified", False),
+    )
+    session.add(lead)
+    session.commit()
+    session.refresh(lead)
+    return lead
+
+def create_estimate(session, lead_id, amount, details=""):
+    est = Estimate(lead_id=lead_id, amount=float(amount), details=details)
+    session.add(est)
+    session.commit()
+    # update lead
+    lead = session.query(Lead).filter(Lead.id == lead_id).first()
+    if lead:
+        lead.estimate_submitted = True
+        lead.estimate_submitted_at = datetime.utcnow()
+        lead.estimated_value = float(amount)
+        lead.status = LeadStatus.ESTIMATE_SUBMITTED
+        session.add(lead)
+        session.commit()
+    return est
+
 def leads_df(session):
-    leads = session.query(Lead).order_by(Lead.created_at.desc()).all()
-    return pd.DataFrame([
-        {
-            "id": l.id,
-            "contact_name": l.contact_name,
-            "estimated_value": l.estimated_value or 0,
-            "status": l.status,
-            "qualified": l.qualified,
-            "created_at": l.created_at,
-            "sla_entered_at": l.sla_entered_at,
-            "sla_hours": l.sla_hours,
-            "damage_type": l.damage_type,
-            "contact_phone": l.contact_phone,
-            "contact_email": l.contact_email,
-            "assigned_to": l.assigned_to,
-            "notes": l.notes,
-            "invoice_path": l.invoice_path
-        } for l in leads
-    ])
+    rows = session.query(Lead).order_by(Lead.created_at.desc()).all()
+    data = []
+    for r in rows:
+        data.append({
+            "id": r.id,
+            "source": r.source,
+            "source_details": r.source_details,
+            "contact_name": r.contact_name,
+            "contact_phone": r.contact_phone,
+            "contact_email": r.contact_email,
+            "property_address": r.property_address,
+            "damage_type": r.damage_type,
+            "assigned_to": r.assigned_to,
+            "notes": r.notes,
+            "estimated_value": r.estimated_value or 0.0,
+            "status": r.status,
+            "created_at": r.created_at,
+            "sla_hours": r.sla_hours or 24,
+            "sla_entered_at": r.sla_entered_at,
+            "contacted": bool(r.contacted),
+            "inspection_scheduled": bool(r.inspection_scheduled),
+            "inspection_scheduled_at": r.inspection_scheduled_at,
+            "inspection_completed": bool(r.inspection_completed),
+            "estimate_submitted": bool(r.estimate_submitted),
+            "awarded_date": r.awarded_date,
+            "awarded_invoice": r.awarded_invoice,
+            "lost_date": r.lost_date,
+            "qualified": bool(r.qualified),
+        })
+    df = pd.DataFrame(data)
+    if df.empty:
+        # ensure columns exist
+        df = pd.DataFrame(columns=[
+            "id","source","source_details","contact_name","contact_phone","contact_email",
+            "property_address","damage_type","assigned_to","notes","estimated_value",
+            "status","created_at","sla_hours","sla_entered_at","contacted","inspection_scheduled",
+            "inspection_scheduled_at","inspection_completed","estimate_submitted","awarded_date",
+            "awarded_invoice","lost_date","qualified"
+        ])
+    return df
 
 def estimates_df(session):
-    est = session.query(Estimate).all()
-    return pd.DataFrame([
-        {
-            "id": e.id,
-            "lead_id": e.lead_id,
-            "amount": e.amount,
-            "approved": e.approved,
-            "lost": e.lost,
-            "lost_reason": e.lost_reason,
-            "created_at": e.created_at
-        } for e in est
-    ])
+    rows = session.query(Estimate).all()
+    data = []
+    for r in rows:
+        data.append({
+            "id": r.id,
+            "lead_id": r.lead_id,
+            "amount": r.amount,
+            "details": r.details,
+            "created_at": r.created_at,
+            "approved": bool(r.approved),
+            "lost": bool(r.lost)
+        })
+    return pd.DataFrame(data)
 
-# ---------- Core Helpers ----------
-def save_uploaded_file(uploaded_file, lead_id, folder="uploaded_invoices"):
-    if not uploaded_file: return None
-    os.makedirs(folder, exist_ok=True)
-    fname = f"lead_{lead_id}_{int(datetime.utcnow().timestamp())}_{uploaded_file.name}"
-    path = os.path.join(folder, fname)
-    open(path, "wb").write(uploaded_file.getbuffer())
+# ---------------------------
+# Utilities
+# ---------------------------
+def save_uploaded_file(uploaded_file, prefix="file"):
+    if uploaded_file is None:
+        return None
+    fname = f"{prefix}_{int(datetime.utcnow().timestamp())}_{uploaded_file.name}"
+    path = os.path.join(UPLOAD_FOLDER, fname)
+    with open(path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
     return path
 
-def create_estimate(session, lead_id, amount, details=None):
-    e = Estimate(lead_id=lead_id, amount=float(amount))
-    session.add(e); session.commit()
-    return e
+# Priority scoring util (simple)
+def compute_priority_for_lead_row(lead_row, weights):
+    try:
+        val = float(lead_row.get("estimated_value") or 0.0)
+        baseline = float(weights.get("value_baseline", 5000.0))
+        value_score = min(val / max(1.0, baseline), 1.0)
+    except Exception:
+        value_score = 0.0
 
-def mark_estimate_sent(session, est_id):
-    e = session.get(Estimate, est_id)
-    if e: e.sent_at = datetime.utcnow(); session.commit()
-
-def mark_estimate_approved(session, est_id):
-    e = session.get(Estimate, est_id)
-    if e:
-        e.approved = True
-        l = session.get(Lead, e.lead_id)
-        if l: l.status = LeadStatus.AWARDED
-        session.commit()
-
-def mark_estimate_lost(session, est_id, reason=None):
-    e = session.get(Estimate, est_id)
-    if e:
-        e.lost = True; e.lost_reason = reason
-        l = session.get(Lead, e.lead_id)
-        if l: l.status = LeadStatus.LOST
-        session.commit()
-
-def remaining_sla_hms(sla_entered_at, sla_hours):
-    if not sla_entered_at: sla_entered_at = datetime.utcnow()
-    if isinstance(sla_entered_at, str):
-        try: sla_entered_at = datetime.fromisoformat(sla_entered_at)
-        except: sla_entered_at = datetime.utcnow()
-    if pd.isna(sla_entered_at): sla_entered_at = datetime.utcnow()
-
-    deadline = sla_entered_at + timedelta(hours=int(sla_hours or 24))
-    remaining = deadline - datetime.utcnow()
-
-    if remaining.total_seconds() <= 0:
-        return "<span style='color:#ef4444;font-weight:700;'>00:00:00 ❗ OVERDUE</span>"
+    sla_entered = lead_row.get("sla_entered_at") or lead_row.get("created_at")
+    if sla_entered is None:
+        time_left_h = 9999.0
     else:
-        h = int(remaining.total_seconds() // 3600)
-        m = int((remaining.total_seconds() % 3600) // 60)
-        return f"<span style='color:#ef4444;font-weight:600;'>{h}h {m}m left</span>"
+        try:
+            if isinstance(sla_entered, str):
+                sla_entered = datetime.fromisoformat(sla_entered)
+            deadline = sla_entered + timedelta(hours=int(lead_row.get("sla_hours") or 24))
+            time_left_h = max((deadline - datetime.utcnow()).total_seconds() / 3600.0, 0.0)
+        except Exception:
+            time_left_h = 9999.0
 
-# ---------- UI Styles ----------
-st.set_page_config(page_title="Project X Pipeline", layout="wide")
+    sla_score = max(0.0, (72.0 - min(time_left_h, 72.0)) / 72.0)
+    contacted_flag = 0.0 if bool(lead_row.get("contacted")) else 1.0
+    inspection_flag = 0.0 if bool(lead_row.get("inspection_scheduled")) else 1.0
+    estimate_flag = 0.0 if bool(lead_row.get("estimate_submitted")) else 1.0
 
-st.markdown("""
-<style>
+    urgency_component = (contacted_flag * weights.get("contacted_w", 0.6)
+                        + inspection_flag * weights.get("inspection_w", 0.5)
+                        + estimate_flag * weights.get("estimate_w", 0.5))
 
-body, .stApp { background-white; }
+    total_weight = (weights.get("value_weight", 0.5)
+                   + weights.get("sla_weight", 0.35)
+                   + weights.get("urgency_weight", 0.15))
+    if total_weight <= 0.0:
+        total_weight = 1.0
 
-.metric-card {
-  background:#111;
-  padding:18px;
-  border-radius:16px;
-  border:1px solid #333;
-  margin:10px 0;
-  color:white;
-  animation:fadeIn 0.4s ease;
+    score = (value_score * weights.get("value_weight", 0.5)
+            + sla_score * weights.get("sla_weight", 0.35)
+            + urgency_component * weights.get("urgency_weight", 0.15)) / total_weight
+    score = max(0.0, min(score, 1.0))
+    return score
+
+def predict_lead_probability(lead_model, lead_row):
+    if lead_model is None:
+        return None
+    try:
+        X = pd.DataFrame([{
+            "estimated_value": lead_row.get("estimated_value") or 0.0,
+            "qualified": 1 if lead_row.get("qualified") else 0,
+            "sla_hours": lead_row.get("sla_hours") or 24
+        }])
+        if hasattr(lead_model, "predict_proba"):
+            return float(lead_model.predict_proba(X)[:,1][0])
+        return float(lead_model.predict(X)[0])
+    except Exception:
+        return None
+
+# ---------------------------
+# UI / CSS
+# ---------------------------
+WHITE_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Comfortaa:wght@400;700&display=swap');
+:root{
+  --app-bg:#ffffff;
+  --text:#0b1220;
+  --muted:#6b7280;
+  --radius:12px;
+  --money-green:#16a34a;
+  --glass-bg: rgba(17,24,39,0.85);
+  --glass-contrast: rgba(255,255,255,0.02);
+  --primary-red:#ef4444;
+  --call-blue:#2563eb;
+  --wa-green:#25D366;
+  --card-padding:14px;
 }
 
-.metric-label { font-size:14px; color:white; font-weight:600; }
+/* base */
+body, .stApp { background: var(--app-bg); color: var(--text); font-family: 'Poppins', sans-serif; }
 
-.metric-value { font-size:36px; font-weight:800; }
+/* header */
+.header { font-family: 'Comfortaa', cursive; font-weight:700; font-size:20px; color:var(--text); padding:12px 0; }
 
-.stage-badge {
-  padding:4px 10px;
-  border-radius:12px;
-  font-size:12px;
-  font-weight:600;
-  margin-left:6px;
+/* KPI metric card */
+.metric-card { border-radius: var(--radius); padding: var(--card-padding); color: #fff; box-shadow: 0 6px 18px rgba(10,10,10,0.06); }
+.metric-num { font-size:26px; font-weight:800; }
+.metric-label { font-size:13px; color: rgba(255,255,255,0.9); margin-top:6px; }
+
+/* Stage card (glassy dark) */
+.stage-card { background: linear-gradient(180deg, rgba(0,0,0,0.7), rgba(17,24,39,0.9)); color: #fff; padding:12px; border-radius:12px; }
+
+/* small muted */
+.small-muted { color: var(--muted); font-size:12px; }
+
+/* prioritized lead card (pipeline style) */
+.priority-card { background: linear-gradient(90deg, rgba(0,0,0,0.07), rgba(255,255,255,0.01)); border-radius:12px; padding:12px; }
+
+/* buttons in HTML */
+.btn-inline { padding:8px 12px; border-radius:10px; font-weight:700; cursor:pointer; border:none; }
+
+/* rounded action button */
+.round-btn { border-radius:999px; padding:10px 18px; font-weight:700; color:#fff; border:none; cursor:pointer; }
+
+/* make main submit buttons medium width */
+.stButton>button, button.stButton>button { min-width:240px; transition: transform .12s ease; border-radius:10px; }
+.stButton>button:hover, button.stButton>button:hover { transform: translateY(-3px); }
+
+/* small responsive tweaks */
+@media (max-width: 900px) {
+  .metric-card { width: 48% !important; display:inline-block !important; margin-bottom:8px; }
 }
+"""
 
-.progress-bar {
-  width:100%;
-  height:6px;
-  background:#222;
-  border-radius:3px;
-  overflow:hidden;
-  margin-top:10px;
-}
-
-.progress-fill {
-  height:100%;
-  border-radius:3px;
-  transition:width 0.5s ease;
-}
-
-@keyframes fadeIn { 0% {opacity:0; transform:translateY(5px)} 100% {opacity:1; transform:translateY(0)} }
-
-button[data-testid="baseButton-secondary"], .stFormSubmitButton button {
-  padding:10px 24px;
-  border-radius:10px;
-  font-size:15px;
-  font-weight:600;
-  min-width:160px;
-  transition:all 0.3s ease;
-}
-
-.stFormSubmitButton button:hover { transform:scale(1.04); }
-
-</style>
-""", unsafe_allow_html=True)
-
+# ---------------------------
+# App start
+# ---------------------------
+st.set_page_config(page_title="Project X — Pipeline", layout="wide", initial_sidebar_state="expanded")
 init_db()
+st.markdown(f"<style>{WHITE_CSS}</style>", unsafe_allow_html=True)
+st.markdown("<div class='header'>Project X — Pipeline & Leads</div>", unsafe_allow_html=True)
 
-# ---------- Navigation ----------
-page = st.sidebar.selectbox("Navigate", ["Lead Capture","Pipeline Board","Analytics"])
+# Sidebar
+with st.sidebar:
+    st.header("Controls")
+    page = st.radio("Go to", ["Leads / Capture", "Pipeline Board", "Analytics & SLA", "Exports"], index=1)
+    st.markdown("---")
 
-s = get_session()
+    if "weights" not in st.session_state:
+        st.session_state.weights = {
+            "value_weight": 0.5, "sla_weight": 0.35, "urgency_weight": 0.15,
+            "contacted_w": 0.6, "inspection_w": 0.5, "estimate_w": 0.5, "value_baseline": 5000.0
+        }
 
-# ---------- Lead Capture ----------
-if page == "Lead Capture":
-    st.header("📥 Lead Capture")
-    with st.form("lead_form"):
-        contact_name = st.text_input("Full Name*")
-        contact_phone = st.text_input("Phone*")
-        contact_email = st.text_input("Email")
-        property_address = st.text_input("Property Address*")
-        damage_type = st.selectbox("Damage Type", ["Water", "Fire", "Mold", "Reconstruction"])
-        assigned_to = st.text_input("Assigned To")
-        sla_hours = st.number_input("SLA response hours", min_value=1,value=24)
+    st.markdown("### Priority weight tuning")
+    st.session_state.weights["value_weight"] = st.slider("Estimate value weight", 0.0, 1.0, float(st.session_state.weights["value_weight"]), step=0.05)
+    st.session_state.weights["sla_weight"] = st.slider("SLA urgency weight", 0.0, 1.0, float(st.session_state.weights["sla_weight"]), step=0.05)
+    st.session_state.weights["urgency_weight"] = st.slider("Flags urgency weight", 0.0, 1.0, float(st.session_state.weights["urgency_weight"]), step=0.05)
+    st.markdown("Within urgency flags:")
+    st.session_state.weights["contacted_w"] = st.slider("Not-contacted weight", 0.0, 1.0, float(st.session_state.weights["contacted_w"]), step=0.05)
+    st.session_state.weights["inspection_w"] = st.slider("Not-scheduled weight", 0.0, 1.0, float(st.session_state.weights["inspection_w"]), step=0.05)
+    st.session_state.weights["estimate_w"] = st.slider("No-estimate weight", 0.0, 1.0, float(st.session_state.weights["estimate_w"]), step=0.05)
+    st.session_state.weights["value_baseline"] = st.number_input("Value baseline", min_value=100.0, value=float(st.session_state.weights["value_baseline"]), step=100.0)
+    st.markdown("---")
 
-        st.markdown("💰 **Job Value Estimate (US Dollars)**")
-        estimated_value = st.number_input("Estimated Job Value ($)", min_value=0.0, step=100.0)
+    if st.button("Add Demo Lead"):
+        s = get_session()
+        add_lead(s,
+                 source="Google Ads", source_details="gclid=demo",
+                 contact_name="Demo Customer", contact_phone="+15550000", contact_email="demo@example.com",
+                 property_address="100 Demo Ave", damage_type="water",
+                 assigned_to="Alex", estimated_value=4500, notes="Demo lead", sla_hours=24, qualified=True)
+        st.success("Demo lead added")
 
-        notes = st.text_area("Notes")
+# optionally auto-refresh pipeline (30s) when on pipeline page
+if page == "Pipeline Board":
+    st.components.v1.html("""
+    <script>
+    // reload page every 30s
+    setTimeout(()=>{ window.location.reload(); }, 30000);
+    </script>
+    """, height=0)
 
-        if st.form_submit_button("➕ Save Lead"):
-            new_lead = Lead(
+# try to load model
+lead_model = None
+if joblib is not None and os.path.exists(MODEL_PATH):
+    try:
+        lead_model = joblib.load(MODEL_PATH)
+    except Exception:
+        lead_model = None
+
+# ---------------------------
+# Page: Leads / Capture
+# ---------------------------
+if page == "Leads / Capture":
+    st.header("📇 Lead Capture")
+    with st.form("lead_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            source = st.selectbox("Lead Source", ["Google Ads", "Organic Search", "Referral", "Phone", "Insurance", "Other"])
+            source_details = st.text_input("Source details (UTM / notes)", placeholder="utm_source=google.")
+            contact_name = st.text_input("Contact name", placeholder="John Doe")
+            contact_phone = st.text_input("Contact phone", placeholder="+1-555-0123")
+            contact_email = st.text_input("Contact email", placeholder="name@example.com")
+        with c2:
+            property_address = st.text_input("Property address", placeholder="123 Main St, City, State")
+            damage_type = st.selectbox("Damage type", ["water", "fire", "mold", "contents", "reconstruction", "other"])
+            assigned_to = st.text_input("Assigned to", placeholder="Estimator name")
+            qualified_choice = st.selectbox("Is the Lead Qualified?", ["No", "Yes"], index=0)
+            sla_hours = st.number_input("SLA hours (first response)", min_value=1, value=24, step=1)
+        notes = st.text_area("Notes", placeholder="Additional context.")
+        est_val = st.number_input("Estimated value (USD)", min_value=0.0, value=0.0, step=100.0)
+        submitted = st.form_submit_button("Create Lead")
+        if submitted:
+            s = get_session()
+            lead = add_lead(
+                s,
+                source=source,
+                source_details=source_details,
                 contact_name=contact_name,
                 contact_phone=contact_phone,
                 contact_email=contact_email,
                 property_address=property_address,
                 damage_type=damage_type,
                 assigned_to=assigned_to,
-                estimated_value=estimated_value,
                 notes=notes,
-                sla_hours=sla_hours,
-                sla_entered_at=datetime.utcnow(),
-                created_at=datetime.utcnow(),
-                qualified=True
+                sla_hours=int(sla_hours),
+                qualified=True if qualified_choice == "Yes" else False,
+                estimated_value=float(est_val or 0.0)
             )
-            s.add(new_lead)
-            s.commit()
-            st.success("Lead saved ✅")
+            st.success(f"Lead created (ID: {lead.id})")
 
-# ---------- Pipeline Board (2 Rows, 4 Cols) ----------
+    st.markdown("---")
+    st.subheader("Recent leads")
+    s = get_session()
+    df_recent = leads_df(s)
+    if df_recent.empty:
+        st.info("No leads yet. Create one above.")
+    else:
+        st.dataframe(df_recent.sort_values("created_at", ascending=False).head(50))
+
+# ---------------------------
+# Page: Pipeline Board (redesigned)
+# ---------------------------
 elif page == "Pipeline Board":
-    st.header("🧭 Pipeline Dashboard")
+    st.header("🧭 Pipeline Dashboard — Redesigned (Glassy pipeline area)")
 
-    df = leads_df(s)
-    total_leads = len(df)
+    s = get_session()
+    leads = s.query(Lead).order_by(Lead.created_at.desc()).all()
+    if not leads:
+        st.info("No leads yet. Create one from Lead Capture.")
+    else:
+        df = leads_df(s)
+        weights = st.session_state.weights
 
-    # Compute funnel
-    funnel = df.groupby("status").size().reindex(LeadStatus.ALL, fill_value=0).reset_index()
-    funnel.columns = ["status", "count"]
-    funnel["percent"] = (funnel["count"]/total_leads*100).round(1)
+        # KPI calculations
+        total_leads = len(df)
+        qualified_leads = int(df[df["qualified"] == True].shape[0]) if not df.empty else 0
+        total_value = float(df["estimated_value"].sum()) if not df.empty else 0.0
+        awarded_leads = int(df[df["status"] == LeadStatus.AWARDED].shape[0]) if not df.empty else 0
+        lost_leads = int(df[df["status"] == LeadStatus.LOST].shape[0]) if not df.empty else 0
+        closed_leads = awarded_leads + lost_leads
+        conversion_rate = (awarded_leads / closed_leads * 100) if closed_leads > 0 else 0.0
+        active_leads = total_leads - closed_leads
+        avg_sla_hours = df["sla_hours"].mean() if (not df.empty and "sla_hours" in df.columns) else 0.0
+        avg_value = (total_value / total_leads) if total_leads else 0.0
 
-    stage_colors = {
-        "New":"#2563eb",
-        "Active":"#f59e0b",
-        "Qualified":"#14b8a6",
-        "Estimate Submitted":"#a855f7",
-        "Awarded":"#22c55e",
-        "Lost":"#ef4444"
-    }
+        # KPI colors (distinct)
+        KPI_COLORS = [
+            ("#111827","#2563eb","Total Leads", total_leads, f"Qualified: {qualified_leads}"),
+            ("#111827","#a855f7","Pipeline Value", f"${total_value:,.0f}", "Estimated value"),
+            ("#111827","#22c55e","Conversion Rate", f"{conversion_rate:.1f}%", f"{awarded_leads} won"),
+            ("#111827","#f97316","Active Leads", active_leads, "In progress"),
+            ("#111827","#ef4444","Awarded", awarded_leads, "Won jobs"),
+            ("#111827","#6b21a8","Lost", lost_leads, "Lost jobs"),
+            ("#111827","#06b6d4","Avg SLA (hrs)", f"{avg_sla_hours:.1f}", "Avg SLA"),
+            ("#111827","#0f172a","Avg Job Value", f"${avg_value:,.0f}", "Average estimate"),
+        ]
 
-    # Build cards
-    cards = []
-    for _,r in funnel.iterrows():
-        color = stage_colors.get(r["status"],"#888")
-        cards.append({"status":r["status"],"count":r["count"],"percent":r["percent"],"color":color})
-
-    # 2×4 grid
-    grid = st.columns(4)
-    row = 0
-    for i,card in enumerate(cards):
-        if i>3 and row==0:
-            st.markdown("<br>",unsafe_allow_html=True)
-            grid = st.columns(4)
-            row = 1
-
-        with grid[i % 4]:
+        # Render KPI cards 2 rows x 4 columns (use inline-blocks)
+        st.markdown("<div style='display:flex;flex-wrap:wrap;gap:8px;'>", unsafe_allow_html=True)
+        for idx, (bg, color, label, value, note) in enumerate(KPI_COLORS):
+            # each card width ~24% for 4 columns
             st.markdown(f"""
-<div class="metric-card">
-  <div style="color:{card['color']}; font-size:13px; font-weight:700; margin-bottom:6px;">{card['status']}</div>
-  <div class="metric-value" style="color:{card['color']};">{card['count']}</div>
-  <div class="progress-bar"><div class="progress-fill" style="background:{card['color']}; width:{card['percent']}%;"></div></div>
-  <div style="margin-top:6px; font-size:12px; color:white; font-weight:600;">{card['percent']}%</div>
-</div>
-""", unsafe_allow_html=True)
+                <div class="metric-card" style="background: linear-gradient(90deg, {bg} 0%, rgba(0,0,0,0.06) 100%); width:24%; padding:16px; display:inline-block;">
+                    <div style="color:{color}; font-size:28px; font-weight:800; text-align:left;">{value}</div>
+                    <div style="color: #ffffff; font-size:14px; font-weight:700; text-align:left; margin-top:6px;">{label}</div>
+                    <div style="color: rgba(255,255,255,0.85); font-size:12px; margin-top:6px;">{note}</div>
+                </div>
+            """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("---")
 
-    # -------- Priority Leads --------
-    priority_list = []
-    for _,r in df.iterrows():
-        priority_list.append({
-            "id":r["id"],
-            "contact_name":r["contact_name"],
-            "status":r["status"],
-            "estimated_value":r["estimated_value"],
-            "damage_type":r["damage_type"],
-            "sla_hms": remaining_sla_hms(r.get("sla_entered_at"), r.get("sla_hours"))
-        })
+        # Stage breakdown (glassy stage cards, 2 rows x up to 4)
+        st.markdown("### 📈 Pipeline Stages")
+        stage_colors = {
+            LeadStatus.NEW: "#2563eb",
+            LeadStatus.CONTACTED: "#eab308",
+            LeadStatus.INSPECTION_SCHEDULED: "#f97316",
+            LeadStatus.INSPECTION_COMPLETED: "#14b8a6",
+            LeadStatus.ESTIMATE_SUBMITTED: "#a855f7",
+            LeadStatus.AWARDED: "#22c55e",
+            LeadStatus.LOST: "#ef4444"
+        }
+        stage_counts = df["status"].value_counts().to_dict()
 
-    pr_df = pd.DataFrame(priority_list)
+        statuses = LeadStatus.ALL.copy()
+        row1_statuses = statuses[:4]
+        row2_statuses = statuses[4:8]
 
-    st.markdown("### 🎯 Priority Leads (Top 8)")
-    for _,r in pr_df.head(8).iterrows():
-        html = f"""
-<div class="metric-card" style="background:#222;border:1px solid #ccc;">
-  <div class="stage-badge" style="background:{stage_colors.get(r['status'],'#777')}20;color:white;">{r['status']}</div>
-  <div style="font-size:18px;font-weight:700;color:white;margin-top:6px;">#{r['id']} — {r['contact_name']}</div>
-  <div style="font-size:13px;color:#eee;margin-top:4px;">{r['damage_type']} | Est: ${r['estimated_value']:,.0f}</div>
-  <div style="margin-top:6px;font-size:13px;">{r['sla_hms']}</div>
-</div>
-"""
-        st.markdown(html, unsafe_allow_html=True)
+        def render_stage_row(row_statuses):
+            cols = st.columns(len(row_statuses))
+            for i, stg in enumerate(row_statuses):
+                cnt = int(stage_counts.get(stg, 0))
+                pct = (cnt / total_leads * 100) if total_leads else 0
+                color = stage_colors.get(stg, "#111827")
+                with cols[i]:
+                    st.markdown(f"""
+                        <div class="stage-card" style="border-radius:12px;">
+                          <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div style="font-weight:700; font-size:14px; color:#fff;">{stg}</div>
+                            <div style="font-weight:900; font-size:26px; color:{color}; text-align:left;">{cnt}</div>
+                          </div>
+                          <div style="height:8px; background: rgba(255,255,255,0.06); border-radius:6px; margin-top:8px; overflow:hidden;">
+                            <div style="width:{pct}%; height:100%; background:{color}; transition: width .4s ease;"></div>
+                          </div>
+                          <div style="text-align:center; margin-top:8px; color: #d1d5db; font-size:12px;">{pct:.1f}%</div>
+                        </div>
+                    """, unsafe_allow_html=True)
 
-    # -------- Editable Lead Progression --------
-    st.markdown("### 📋 All Leads")
+        render_stage_row(row1_statuses)
+        render_stage_row(row2_statuses)
+        st.markdown("---")
 
-    for lead in leads:
-        title = f"#{lead.id} — {lead.contact_name} — {lead.damage_type} — ${lead.estimated_value:,.0f}"
+        # Priority leads top 8
+        st.markdown("### 🎯 Priority Leads (Top 8)")
+        priority_list = []
+        for _, row in df.iterrows():
+            try:
+                score = compute_priority_for_lead_row(row, weights)
+            except Exception:
+                score = 0.0
+            sla_entered = row.get("sla_entered_at") or row.get("created_at")
+            if isinstance(sla_entered, str):
+                try:
+                    sla_entered = datetime.fromisoformat(sla_entered)
+                except:
+                    sla_entered = datetime.utcnow()
+            elif pd.isna(sla_entered):
+                sla_entered = datetime.utcnow()
+            deadline = sla_entered + timedelta(hours=int(row.get("sla_hours") or 24))
+            remaining = deadline - datetime.utcnow()
+            overdue = remaining.total_seconds() <= 0
 
-        with st.expander(title):
-            new_status = st.selectbox("Move Stage", LeadStatus.ALL, index=LeadStatus.ALL.index(lead.status))
-            invoice = None
-            if new_status == LeadStatus.AWARDED:
-                invoice = st.file_uploader("Upload Invoice (optional)", key=f"inv_{lead.id}")
+            prob = None
+            if lead_model is not None:
+                try:
+                    prob = predict_lead_probability(lead_model, row)
+                except Exception:
+                    prob = None
 
-            if st.button("Update Stage + Analytics"):
-                lead.status = new_status
-                if invoice:
-                    lead.invoice_path = save_uploaded_file(invoice, lead.id)
-                s.add(lead); s.commit()
-                st.rerun()
+            priority_list.append({
+                "id": int(row["id"]),
+                "contact_name": row.get("contact_name") or "No name",
+                "estimated_value": float(row.get("estimated_value") or 0.0),
+                "time_left_hours": float(remaining.total_seconds() / 3600.0),
+                "priority_score": score,
+                "status": row.get("status"),
+                "sla_overdue": overdue,
+                "sla_deadline": deadline,
+                "conversion_prob": prob,
+                "damage_type": row.get("damage_type", "Unknown")
+            })
 
-# ---------- Analytics ----------
-elif page == "Analytics":
-    st.header("📊 Analytics (Auto Updates)")
+        pr_df = pd.DataFrame(priority_list).sort_values("priority_score", ascending=False)
+        if pr_df.empty:
+            st.info("No priority leads to display.")
+        else:
+            # show cards in 2 columns for compactness
+            cols = st.columns(2)
+            left_col = cols[0]
+            right_col = cols[1]
+            for i, (_, r) in enumerate(pr_df.head(8).iterrows()):
+                html = ""
+                score = r["priority_score"]
+                status_color = stage_colors.get(r["status"], "#111827")
+                if score >= 0.7:
+                    priority_color = "#ef4444"
+                    priority_label = "🔴 CRITICAL"
+                elif score >= 0.45:
+                    priority_color = "#f97316"
+                    priority_label = "🟠 HIGH"
+                else:
+                    priority_color = "#22c55e"
+                    priority_label = "🟢 NORMAL"
+
+                if r["sla_overdue"]:
+                    sla_html = f"<span style='color:{priority_color}; font-weight:800;'>❗ OVERDUE</span>"
+                else:
+                    hours_left = int(r['time_left_hours'])
+                    mins_left = int((r['time_left_hours'] * 60) % 60)
+                    sla_html = f"<span style='color:{priority_color}; font-weight:700;'>⏳ {hours_left}h {mins_left}m left</span>"
+
+                conv_html = ""
+                if r["conversion_prob"] is not None:
+                    conv_pct = r["conversion_prob"] * 100
+                    conv_color = "#22c55e" if conv_pct > 70 else ("#f97316" if conv_pct > 40 else "#ef4444")
+                    conv_html = f"<span style='color:{conv_color}; font-weight:700; margin-left:8px;'>📊 {conv_pct:.0f}%</span>"
+
+                # Balanced HTML (no stray closing tags)
+                card_html = f"""
+                <div style="background: var(--glass-bg); padding:12px; border-radius:12px; margin-bottom:10px; border:1px solid rgba(255,255,255,0.03);">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="flex:1;">
+                      <div style="margin-bottom:8px;">
+                        <span style="color:{priority_color}; font-weight:800; font-size:13px;">{priority_label}</span>
+                        <span style="display:inline-block; padding:6px 10px; border-radius:20px; font-size:12px; font-weight:700; margin-left:8px; background:{status_color}22; color:{status_color}; border:1px solid {status_color}35;">{r['status']}</span>
+                      </div>
+                      <div style="font-size:16px; font-weight:800; color:var(--text); margin-bottom:4px;">#{int(r['id'])} — {r['contact_name']}</div>
+                      <div style="font-size:13px; color:var(--muted); margin-bottom:6px;">{r['damage_type'].title()} | Est: <span style='color:var(--money-green); font-weight:800;'>${r['estimated_value']:,.0f}</span></div>
+                      <div style="font-size:13px;">{sla_html} {conv_html}</div>
+                    </div>
+                    <div style="text-align:right; padding-left:18px;">
+                      <div style="font-size:34px; font-weight:900; color:{priority_color}; text-align:left;">{score:.2f}</div>
+                      <div style="font-size:11px; color:var(--muted); text-transform:uppercase;">Priority</div>
+                    </div>
+                  </div>
+                </div>
+                """
+                if i % 2 == 0:
+                    left_col.markdown(card_html, unsafe_allow_html=True)
+                else:
+                    right_col.markdown(card_html, unsafe_allow_html=True)
+
+        st.markdown("---")
+        # Expandable all leads to Edit / Award / Lost
+        st.markdown("### 📋 All Leads (expand to edit / award / lost)")
+        for lead in leads:
+            est_val_display = f"${lead.estimated_value:,.0f}" if lead.estimated_value else "$0"
+            card_title = f"#{lead.id} — {lead.contact_name or 'No name'} — {lead.damage_type or 'Unknown'} — {est_val_display}"
+            with st.expander(card_title, expanded=False):
+                colA, colB = st.columns([3,1])
+                with colA:
+                    st.markdown(f"**Source:** {lead.source or '—'}  &nbsp;&nbsp; **Assigned:** {lead.assigned_to or '—'}")
+                    st.markdown(f"**Address:** {lead.property_address or '—'}")
+                    st.markdown(f"**Notes:** {lead.notes or '—'}")
+                    st.markdown(f"**Created:** {lead.created_at.strftime('%Y-%m-%d %H:%M') if lead.created_at else '—'}")
+                with colB:
+                    entered = lead.sla_entered_at or lead.created_at
+                    if isinstance(entered, str):
+                        try:
+                            entered = datetime.fromisoformat(entered)
+                        except:
+                            entered = datetime.utcnow()
+                    if entered is None:
+                        entered = datetime.utcnow()
+                    deadline = entered + timedelta(hours=(lead.sla_hours or 24))
+                    remaining = deadline - datetime.utcnow()
+                    if remaining.total_seconds() <= 0:
+                        sla_status_html = "<div style='color:#ef4444;font-weight:800;'>❗ OVERDUE</div>"
+                    else:
+                        hours = int(remaining.total_seconds() // 3600)
+                        mins = int((remaining.total_seconds() % 3600) // 60)
+                        sla_status_html = f"<div style='color:#ef4444;font-weight:700;'>⏳ {hours}h {mins}m</div>"
+                    badge_color = stage_colors.get(lead.status, "#111827")
+                    st.markdown(f"""
+                        <div style='text-align:right;'>
+                            <div style='display:inline-block; padding:8px 14px; border-radius:999px; background:{badge_color}; color:#fff; font-weight:800;'>{lead.status}</div>
+                            <div style='margin-top:12px;'>{sla_status_html}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                st.markdown("---")
+                # contact buttons
+                qc1, qc2, qc3, _ = st.columns([1,1,1,5])
+                phone = (lead.contact_phone or "").strip()
+                email = (lead.contact_email or "").strip()
+                if phone:
+                    with qc1:
+                        st.markdown(f"<a href='tel:{phone}'><button class='round-btn' style='background:var(--call-blue);'>📞 Call</button></a>", unsafe_allow_html=True)
+                    with qc2:
+                        wa_number = phone.lstrip("+").replace(" ", "").replace("-", "")
+                        wa_link = f"https://wa.me/{wa_number}?text=Hi%2C%20following%20up%20on%20your%20restoration%20request."
+                        st.markdown(f"<a href='{wa_link}' target='_blank'><button class='round-btn' style='background:var(--wa-green); color:#000;'>💬 WhatsApp</button></a>", unsafe_allow_html=True)
+                else:
+                    qc1.write(" "); qc2.write(" ")
+                if email:
+                    with qc3:
+                        st.markdown(f"<a href='mailto:{email}?subject=Follow%20up'><button class='round-btn' style='background:#111827;'>✉️ Email</button></a>", unsafe_allow_html=True)
+                else:
+                    qc3.write(" ")
+
+                st.markdown("---")
+                # Lead update form
+                with st.form(f"update_lead_{lead.id}"):
+                    st.markdown("#### Update Lead")
+                    u1, u2 = st.columns(2)
+                    with u1:
+                        new_status = st.selectbox("Status", LeadStatus.ALL, index=LeadStatus.ALL.index(lead.status) if lead.status in LeadStatus.ALL else 0, key=f"status_{lead.id}")
+                        new_assigned = st.text_input("Assigned to", value=lead.assigned_to or "", key=f"assign_{lead.id}")
+                        contacted_cb = st.checkbox("Contacted", value=bool(lead.contacted), key=f"contacted_{lead.id}")
+                    with u2:
+                        insp_sched = st.checkbox("Inspection Scheduled", value=bool(lead.inspection_scheduled), key=f"insp_sched_{lead.id}")
+                        insp_comp = st.checkbox("Inspection Completed", value=bool(lead.inspection_completed), key=f"insp_comp_{lead.id}")
+                        est_sub = st.checkbox("Estimate Submitted", value=bool(lead.estimate_submitted), key=f"est_sub_{lead.id}")
+                    new_notes = st.text_area("Notes", value=lead.notes or "", key=f"notes_{lead.id}")
+                    new_est_val = st.number_input("Job Value Estimate (USD)", value=float(lead.estimated_value or 0.0), min_value=0.0, step=100.0, key=f"estval_{lead.id}")
+
+                    # Awarded / Lost UI
+                    awarded_file = None
+                    awarded_comment = ""
+                    lost_comment = ""
+                    if new_status == LeadStatus.AWARDED:
+                        st.markdown("**Award details**")
+                        awarded_comment = st.text_area("Award comment", key=f"award_comment_{lead.id}")
+                        awarded_file = st.file_uploader("Upload Invoice File (optional) — only for Awarded", type=["pdf","jpg","jpeg","png","xlsx","csv"], key=f"award_inv_{lead.id}")
+                    elif new_status == LeadStatus.LOST:
+                        st.markdown("**Lost details**")
+                        lost_comment = st.text_area("Lost comment", key=f"lost_comment_{lead.id}")
+
+                    if st.form_submit_button("💾 Update Lead"):
+                        try:
+                            db_lead = s.query(Lead).filter(Lead.id == lead.id).first()
+                            if db_lead:
+                                db_lead.status = new_status
+                                db_lead.assigned_to = new_assigned
+                                db_lead.contacted = bool(contacted_cb)
+                                db_lead.inspection_scheduled = bool(insp_sched)
+                                db_lead.inspection_completed = bool(insp_comp)
+                                db_lead.estimate_submitted = bool(est_sub)
+                                db_lead.notes = new_notes
+                                db_lead.estimated_value = float(new_est_val or 0.0)
+                                # ensure sla_entered_at present
+                                if db_lead.sla_entered_at is None:
+                                    db_lead.sla_entered_at = datetime.utcnow()
+                                if new_status == LeadStatus.AWARDED:
+                                    db_lead.awarded_date = datetime.utcnow()
+                                    db_lead.awarded_comment = awarded_comment
+                                    if awarded_file is not None:
+                                        path = save_uploaded_file(awarded_file, prefix=f"lead_{db_lead.id}_inv")
+                                        db_lead.awarded_invoice = path
+                                if new_status == LeadStatus.LOST:
+                                    db_lead.lost_date = datetime.utcnow()
+                                    db_lead.lost_comment = lost_comment
+                                s.add(db_lead)
+                                s.commit()
+                                st.success(f"Lead #{db_lead.id} updated.")
+                            else:
+                                st.error("Lead not found.")
+                        except Exception as e:
+                            st.error("Failed to update lead.")
+                            st.write(traceback.format_exc())
+
+# ---------------------------
+# Page: Analytics & SLA
+# ---------------------------
+elif page == "Analytics & SLA":
+    st.header("📈 Funnel Analytics & SLA (Donut)")
+    s = get_session()
     df = leads_df(s)
-    pie = df["status"].value_counts()
+    if df.empty:
+        st.info("No leads to analyze.")
+    else:
+        try:
+            status_counts = df["status"].value_counts().reindex(LeadStatus.ALL, fill_value=0)
+        except Exception:
+            status_counts = df.groupby("status").size().reindex(LeadStatus.ALL, fill_value=0)
 
-    plt.figure()
-    plt.pie(pie.values, labels=pie.index)
-    plt.title("Pipeline Conversion Funnel")
-    st.pyplot(plt)
+        pie_df = pd.DataFrame({"status": status_counts.index, "count": status_counts.values})
+        colors = ["#2563eb","#eab308","#f97316","#14b8a6","#a855f7","#22c55e","#ef4444"]
+        fig = px.pie(pie_df, names="status", values="count", hole=0.45,
+                     color="status", color_discrete_sequence=colors[:len(pie_df)])
+        fig.update_traces(textposition='inside', textinfo='percent+label')
+        fig.update_layout(legend=dict(orientation="h", y=-0.15), margin=dict(t=10,b=10))
+        st.plotly_chart(fig, use_container_width=True)
 
-# =================== END FULL APP CODE ===================
+        st.markdown("---")
+        st.subheader("SLA / Overdue Leads")
+        overdue_rows = []
+        for _, row in df.iterrows():
+            sla_entered_at = row.get("sla_entered_at") or row.get("created_at")
+            try:
+                if pd.isna(sla_entered_at) or sla_entered_at is None:
+                    sla_entered_at = datetime.utcnow()
+                elif isinstance(sla_entered_at, str):
+                    sla_entered_at = datetime.fromisoformat(sla_entered_at)
+            except Exception:
+                sla_entered_at = datetime.utcnow()
+            sla_hours = int(row.get("sla_hours") or 24)
+            deadline = sla_entered_at + timedelta(hours=sla_hours)
+            remaining = deadline - datetime.utcnow()
+            overdue = remaining.total_seconds() <= 0
+            overdue_rows.append({
+                "id": row.get("id"),
+                "contact": row.get("contact_name"),
+                "status": row.get("status"),
+                "deadline": deadline,
+                "overdue": overdue
+            })
+        df_overdue = pd.DataFrame(overdue_rows)
+        if not df_overdue.empty:
+            st.dataframe(df_overdue.sort_values("deadline"))
+        else:
+            st.info("No SLA overdue leads.")
+
+# ---------------------------
+# Page: Exports
+# ---------------------------
+elif page == "Exports":
+    st.header("📤 Exports")
+    s = get_session()
+    df_leads = leads_df(s)
+    if df_leads.empty:
+        st.info("No leads to export.")
+    else:
+        csv = df_leads.to_csv(index=False).encode("utf-8")
+        st.download_button("Download leads.csv", csv, file_name="leads.csv", mime="text/csv")
+    df_est = estimates_df(s)
+    if not df_est.empty:
+        st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode("utf-8"), file_name="estimates.csv", mime="text/csv")
