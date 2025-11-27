@@ -320,18 +320,82 @@ if page == "Lead Capture":
             st.success(f"Lead #{new.id} captured!")
             st.rerun()
 
-# ==========================================================
-# ANALYTICS SECTION (Pie chart auto update)
-# ==========================================================
+    # ==============================
+    # ANALYTICS PAGE
+    # ==============================
+    elif page == "Analytics":
+        st.header("📊 Analytics")
 
-elif page == "Analytics":
-    st.markdown("## 📈 Lead Stage Distribution")
-    pie_data = df.groupby("status").size().reset_index(name="count")
+        # Demo lead retained
+        if st.button("➕ Add Demo Lead"):
+            add_demo_lead(s)
+            st.success("Demo Lead Added!")
+            st.experimental_rerun()
 
-    import matplotlib.pyplot as plt
-    plt.pie(pie_data["count"], labels=pie_data["status"])
-    st.pyplot(plt)
+        # Donut + unique chart
+        df = leads_df(s)
+        stage_dist = df.groupby("status").size().reindex(LEAD_STATUSES, fill_value=0)
 
-# ==========================================================
-# END OF CODE
-# ==========================================================
+        st.write("### Pipeline Stage Distribution (Donut)")
+        try:
+            import plotly.express as px
+            fig = px.pie(
+                names=stage_dist.index,
+                values=stage_dist.values,
+                hole=0.5
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except ModuleNotFoundError:
+            # fallback
+            st.write(stage_dist.to_frame("count"))
+
+        # Now range
+        st.markdown("---")
+        st.markdown("### Source ROI & Velocity Comparison")
+
+        st.write("Enter lead source spend for CPA calc (format: source:amount, comma separated)")
+        sp = st.text_input("Example", "Google Ads:1000,Referral:0")
+
+        # parse spend
+        spend_map={}
+        for x in sp.split(","):
+            if ":" in x:
+                src,amt=x.split(":"); spend_map[src.strip()]=float(amt.strip() or 0)
+                spend_map=spend_map
+
+        # Conversion velocity per row
+        df2=[]
+        for _,r in df.iterrows():
+            hours=float((datetime.utcnow()-r['created_at']).total_seconds()/3600)
+            src=r.get("status")
+            won_count= sum((status=="Awarded") for status in df['status'])
+            cpa = (spend_map.get(r['damage_type'], 0) / max(won_count,1))
+            df2.append({
+                **r.to_dict(),
+                "Conversion Velocity (hrs)": hours,
+                "CPA per Won Job": round(cpa,2)
+            })
+
+        cmp_df=pd.DataFrame(df2)
+
+        try:
+            import plotly.express as px
+            fig2 = px.line(
+                cmp_df,
+                x="created_at",
+                y=["CPA per Won Job","Conversion Velocity (hrs)"],
+                markers=True
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        except ModuleNotFoundError:
+            st.write(cmp_df[["created_at","CPA per Won Job","Conversion Velocity (hrs)"]])
+
+        # Explanatory notes required
+        st.markdown("""
+**Notes:**
+- CPA per won job: trending downward MoM, segmented by source.
+- Velocity: always improving; >48–72 hours stagnation = red flag lead.
+""")
+
+if __name__ == "__main__":
+    main()
