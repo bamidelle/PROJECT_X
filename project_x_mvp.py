@@ -1,12 +1,13 @@
-# project_x_singlefile_v6.py
-# Project X — Pipeline + Analytics + Full Step 5 ML Deployment (All features integrated)
-# Requirements (recommended): streamlit, sqlalchemy, pandas, scikit-learn, joblib, plotly, python-docx
-# Run: streamlit run project_x_singlefile_v6.py
+# project_x_full_v1.py
+# Single-file Project X — Steps 1..5 combined
+# Requirements (recommended): streamlit, sqlalchemy, pandas, scikit-learn, joblib, plotly, python-docx, shap
+# Run: streamlit run project_x_full_v1.py
 
 import os
 import time
 import traceback
 from datetime import datetime, timedelta
+from typing import Tuple, Optional, Dict, Any, List
 
 import streamlit as st
 import pandas as pd
@@ -26,11 +27,13 @@ except Exception:
 try:
     from sklearn.model_selection import train_test_split
     from sklearn.ensemble import RandomForestClassifier
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, roc_curve
-    from sklearn.preprocessing import OneHotEncoder
+    from sklearn.metrics import (
+        accuracy_score, precision_score, recall_score, f1_score,
+        roc_auc_score, confusion_matrix, roc_curve
+    )
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
     from sklearn.compose import ColumnTransformer
     from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import StandardScaler
     SKLEARN_AVAILABLE = True
 except Exception:
     SKLEARN_AVAILABLE = False
@@ -42,6 +45,18 @@ try:
 except Exception:
     DOCX_AVAILABLE = False
 
+# shap optional
+try:
+    import shap
+except Exception:
+    shap = None
+
+# matplotlib for PDP fallback
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
+
 # SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
@@ -50,19 +65,19 @@ from sqlalchemy.orm import sessionmaker
 # ---------------------------
 # CONFIG
 # ---------------------------
-DB_FILE = os.getenv("PROJECT_X_DB", "project_x_singlefile_v6.db")
+DB_FILE = os.getenv("PROJECT_X_DB", "project_x_full_v1.db")
 DATABASE_URL = f"sqlite:///{DB_FILE}"
 MODEL_DIR = "models"
-MODEL_PATH = os.path.join(MODEL_DIR, "pipeline_model.joblib")
-ENC_PATH = os.path.join(MODEL_DIR, "encoders.joblib")
+MODEL_PATH = os.path.join(MODEL_DIR, "lead_conversion_model_v1.joblib")
+ENC_PATH = os.path.join(MODEL_DIR, "model_encoders.joblib")
 os.makedirs(MODEL_DIR, exist_ok=True)
+
+UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploaded_files")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
-
-UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploaded_files")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ---------------------------
 # ORM MODELS
@@ -104,12 +119,13 @@ class Lead(Base):
 
     awarded_comment = Column(Text, nullable=True)
     awarded_date = Column(DateTime, nullable=True)
-    awarded_invoice = Column(String, nullable=True)
+    awarded_invoice = Column(String, nullable=True)  # user wanted awarded_invoice storage in field 'b'
 
     lost_comment = Column(Text, nullable=True)
     lost_date = Column(DateTime, nullable=True)
 
     qualified = Column(Boolean, default=False)
+    # predicted probability column will be added via migrations if not present
 
 class Estimate(Base):
     __tablename__ = "estimates"
@@ -126,9 +142,24 @@ class Estimate(Base):
 # ---------------------------
 def create_tables_and_migrate():
     Base.metadata.create_all(bind=engine)
+    # run lightweight migration to add predicted_prob if absent
+    run_migration_add_predicted_prob()
 
 def get_session():
     return SessionLocal()
+
+def run_migration_add_predicted_prob():
+    # Check if predicted_prob exists; if not, add column
+    try:
+        from sqlalchemy import inspect
+        insp = inspect(engine)
+        cols = [c['name'] for c in insp.get_columns('leads')]
+        if 'predicted_prob' not in cols:
+            with engine.connect() as conn:
+                conn.execute("ALTER TABLE leads ADD COLUMN predicted_prob FLOAT")
+    except Exception:
+        # SQLite ALTER TABLE is limited but adding a column with default works for simple case
+        pass
 
 def add_lead(session, *, source="Unknown", source_details=None, contact_name=None, contact_phone=None,
              contact_email=None, property_address=None, damage_type=None, assigned_to=None, notes=None,
@@ -195,7 +226,8 @@ def leads_df(session):
             "awarded_date": r.awarded_date,
             "awarded_invoice": r.awarded_invoice,
             "lost_date": r.lost_date,
-            "qualified": bool(r.qualified)
+            "qualified": bool(r.qualified),
+            "predicted_prob": getattr(r, "predicted_prob", None)
         })
     df = pd.DataFrame(data)
     if df.empty:
@@ -203,7 +235,7 @@ def leads_df(session):
             "id","source","source_details","contact_name","contact_phone","contact_email",
             "property_address","damage_type","assigned_to","notes","estimated_value","status",
             "created_at","sla_hours","sla_entered_at","contacted","inspection_scheduled","inspection_scheduled_at",
-            "inspection_completed","estimate_submitted","awarded_date","awarded_invoice","lost_date","qualified"
+            "inspection_completed","estimate_submitted","awarded_date","awarded_invoice","lost_date","qualified","predicted_prob"
         ])
     return df
 
@@ -247,8 +279,7 @@ def calculate_remaining_sla(sla_entered_at, sla_hours):
         return float("inf"), False
 
 def compute_priority_for_lead_row(lead_row, weights, ml_prob=None):
-    """Original priority score combined with optional ML probability boost.
-       Returns 0..1 score"""
+    """Compute priority score (0..1) with optional ML probability component."""
     try:
         val = float(lead_row.get("estimated_value") or 0.0)
         baseline = float(weights.get("value_baseline", 5000.0))
@@ -288,30 +319,47 @@ def compute_priority_for_lead_row(lead_row, weights, ml_prob=None):
              urgency_component * weights.get("urgency_weight", 0.15)) / total_weight
     score = max(0.0, min(score, 1.0))
 
-    # If ML probability available, incorporate gently (example: add 0.3 * prob)
+    # incorporate ML probability gently
     if ml_prob is not None:
-        score = max(0.0, min(1.0, score * (1 - 0.25) + ml_prob * 0.25))
+        # mix score: 75% rule-based + 25% ML prob
+        score = max(0.0, min(1.0, score * 0.75 + ml_prob * 0.25))
 
     return score
 
+def predict_lead_probability_safe(model, X_row_df):
+    """Given a fitted sklearn pipeline model and a single-row feature DF, return win prob or None."""
+    if model is None or not SKLEARN_AVAILABLE or X_row_df is None or X_row_df.empty:
+        return None
+    try:
+        if hasattr(model, "predict_proba"):
+            return float(model.predict_proba(X_row_df)[:, 1][0])
+        elif hasattr(model, "predict"):
+            return float(model.predict(X_row_df)[0])
+        else:
+            return None
+    except Exception:
+        return None
+
 # ---------------------------
-# ML: feature builder, train, save, load
+# ML: feature builder, pipeline, train/save/load, persistence
 # ---------------------------
-def build_feature_df_for_training(df):
-    """Build X, y from leads_df; label = status == 'Awarded' (user selected option 1)"""
+def build_feature_df(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+    """Return X (features) and y (labels) for model training.
+       Label: whether lead is AWARDED (1) vs not awarded (0).
+       Features: estimated_value, qualified, sla_hours, contacted, inspection_scheduled, estimate_submitted,
+                 damage_type, source
+    """
     if df is None or df.empty:
         return pd.DataFrame(), pd.Series(dtype=int)
     d = df.copy()
     d["label_awarded"] = (d["status"] == LeadStatus.AWARDED).astype(int)
-    # choose features
     features = [
-        "estimated_value", "qualified", "sla_hours",
-        "contacted", "inspection_scheduled", "estimate_submitted",
-        "damage_type", "source"
+        "estimated_value", "qualified", "sla_hours", "contacted",
+        "inspection_scheduled", "estimate_submitted", "damage_type", "source"
     ]
-    for f in features:
-        if f not in d.columns:
-            d[f] = 0
+    for c in features:
+        if c not in d.columns:
+            d[c] = 0
     X = d[features].copy()
     X["estimated_value"] = X["estimated_value"].fillna(0.0).astype(float)
     X["qualified"] = X["qualified"].astype(int)
@@ -321,10 +369,10 @@ def build_feature_df_for_training(df):
     X["estimate_submitted"] = X["estimate_submitted"].astype(int)
     X["damage_type"] = X["damage_type"].fillna("unknown").astype(str)
     X["source"] = X["source"].fillna("unknown").astype(str)
-    y = d["label_awarded"].astype(int)
+    y = d["label_awarded"]
     return X, y
 
-def create_model_pipeline(n_estimators=120, max_depth=6):
+def create_sklearn_pipeline():
     if not SKLEARN_AVAILABLE:
         return None
     numeric_cols = ["estimated_value", "qualified", "sla_hours", "contacted", "inspection_scheduled", "estimate_submitted"]
@@ -335,33 +383,51 @@ def create_model_pipeline(n_estimators=120, max_depth=6):
     ], remainder="drop")
     model = Pipeline(steps=[
         ("pre", preproc),
-        ("clf", RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=42))
+        ("clf", RandomForestClassifier(n_estimators=120, max_depth=6, random_state=42))
     ])
     return model
 
-def save_model_bundle(model, X_sample=None, encoders=None, metrics=None, path=MODEL_PATH):
+def save_model(model, path=MODEL_PATH):
     if joblib is None:
-        return False, "joblib not available"
-    bundle = {"model": model, "features": list(X_sample.columns) if X_sample is not None else None, "metrics": metrics}
-    joblib.dump(bundle, path)
-    if encoders is not None:
-        joblib.dump(encoders, ENC_PATH)
-    return True, path
-
-def load_model_bundle(path=MODEL_PATH):
-    if not os.path.exists(path) or joblib is None:
-        return None, None, None
+        return False, "joblib not installed"
     try:
-        bundle = joblib.load(path)
-        enc = None
-        if os.path.exists(ENC_PATH):
-            try:
-                enc = joblib.load(ENC_PATH)
-            except Exception:
-                enc = None
-        return bundle.get("model"), bundle.get("features"), bundle.get("metrics"), enc
+        joblib.dump(model, path)
+        return True, path
+    except Exception as e:
+        return False, str(e)
+
+def load_model(path=MODEL_PATH):
+    if joblib is None:
+        return None, "joblib not installed"
+    if not os.path.exists(path):
+        return None, "path not found"
+    try:
+        m = joblib.load(path)
+        return m, None
+    except Exception as e:
+        return None, str(e)
+
+def persist_prediction_to_db(lead_id: int, prob: float):
+    """Store predicted probability into lead.predicted_prob (migration must have created column)."""
+    try:
+        s = get_session()
+        lead = s.query(Lead).filter(Lead.id == lead_id).first()
+        if lead:
+            # set attribute; attribute exists after migration, but SQLAlchemy mapping allows setting even if column absent won't persist
+            setattr(lead, "predicted_prob", float(prob))
+            s.add(lead); s.commit()
+            return True
     except Exception:
-        return None, None, None, None
+        pass
+    return False
+
+# ---------------------------
+# Confidence band helper
+# ---------------------------
+def confidence_band(prob: float, width: float = 0.08) -> Tuple[float, float]:
+    low = max(0.0, prob - width)
+    high = min(1.0, prob + width)
+    return low, high
 
 # ---------------------------
 # CSS / UI
@@ -382,6 +448,7 @@ body, .stApp { background: var(--bg); color: var(--text); font-family: 'Poppins'
 .header { font-family: 'Comfortaa', cursive; font-size:20px; font-weight:700; color:var(--text); padding:8px 0; }
 .metric-card { border-radius: var(--card-radius); padding:16px; margin:8px; color:#fff; display:inline-block; vertical-align:top; box-shadow: 0 6px 16px rgba(16,24,40,0.06); transition: transform .18s ease, box-shadow .18s ease; }
 .metric-card:hover { transform: translateY(-6px); box-shadow: 0 12px 28px rgba(16,24,40,0.12); }
+.stage-card { background: #000; color: #fff; padding:12px; border-radius:10px; margin:6px; box-shadow: 0 6px 14px rgba(0,0,0,0.06); }
 .progress-bar { width:100%; height:10px; background:#e6e6e6; border-radius:8px; overflow:hidden; margin-top:8px; }
 .progress-fill { height:100%; border-radius:8px; transition: width .4s ease; }
 .kpi-title { color: #ffffff; font-weight:600; font-size:13px; margin-bottom:6px; opacity:0.95; }
@@ -392,18 +459,20 @@ body, .stApp { background: var(--bg); color: var(--text); font-family: 'Poppins'
 """
 
 # ---------------------------
-# App start
+# APP START
 # ---------------------------
 create_tables_and_migrate()
-st.set_page_config(page_title="Project X — Pipeline (ML)", layout="wide", initial_sidebar_state="expanded")
-st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
-st.markdown("<div class='header'>Project X — Sales & Conversion Tracker (with Full ML)</div>", unsafe_allow_html=True)
 
-# Sidebar: navigation & model controls
+st.set_page_config(page_title="Project X — Pipeline (Steps 1-5)", layout="wide", initial_sidebar_state="expanded")
+st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
+st.markdown("<div class='header'>Project X — Sales & Conversion Tracker (Steps 1–5)</div>", unsafe_allow_html=True)
+
+# ---------------------------
+# Sidebar controls
+# ---------------------------
 with st.sidebar:
     st.header("Controls")
     page = st.radio("Go to", ["Leads / Capture", "Pipeline Board", "Analytics & SLA", "ML Model", "Evaluation Dashboard", "AI Recommendations", "Pipeline Report", "Exports"], index=1)
-
     st.markdown("---")
     if "weights" not in st.session_state:
         st.session_state.weights = {
@@ -414,46 +483,57 @@ with st.sidebar:
     st.session_state.weights["value_weight"] = st.slider("Estimate value weight", 0.0, 1.0, float(st.session_state.weights["value_weight"]), step=0.05)
     st.session_state.weights["sla_weight"] = st.slider("SLA urgency weight", 0.0, 1.0, float(st.session_state.weights["sla_weight"]), step=0.05)
     st.session_state.weights["urgency_weight"] = st.slider("Flags urgency weight", 0.0, 1.0, float(st.session_state.weights["urgency_weight"]), step=0.05)
-
     st.markdown("---")
-    st.markdown("### Model (Load / Clear)")
+    st.markdown("### Model (optional)")
     st.write("Model file path (joblib):")
     model_path_in = st.text_input("Model path", value=MODEL_PATH)
     if st.button("Load model"):
         if joblib and os.path.exists(model_path_in):
             try:
-                model, feats, metrics, enc = load_model_bundle(model_path_in)
-                st.session_state.lead_model = model
-                st.session_state.model_features = feats
-                st.session_state.model_metrics = metrics
-                st.session_state.model_encoders = enc
-                st.success("Model loaded into session.")
+                m, err = load_model(model_path_in)
+                if m:
+                    st.session_state.lead_model = m
+                    st.success("Model loaded (session).")
+                else:
+                    st.error(f"Failed to load model: {err}")
             except Exception as e:
                 st.error(f"Failed to load model: {e}")
         else:
             st.info("Model path not found or joblib not available.")
     if st.button("Clear loaded model"):
         st.session_state.lead_model = None
-        st.session_state.model_features = None
-        st.session_state.model_metrics = None
-        st.session_state.model_encoders = None
-        st.success("Model cleared.")
+        st.success("Model cleared from session.")
+    st.markdown("---")
+    if st.button("Add Demo Lead"):
+        s = get_session()
+        add_lead(
+            s,
+            source="Google Ads",
+            source_details="gclid=demo",
+            contact_name="Demo Customer",
+            contact_phone="+15550000",
+            contact_email="demo@example.com",
+            property_address="100 Demo Ave",
+            damage_type="water",
+            assigned_to="Alex",
+            estimated_value=4500,
+            notes="Demo lead",
+            sla_hours=24,
+            qualified=True
+        )
+        st.success("Demo lead added")
 
-# session model holders
+# session model holder
 if "lead_model" not in st.session_state:
     st.session_state.lead_model = None
 if "model_features" not in st.session_state:
     st.session_state.model_features = None
 if "model_metrics" not in st.session_state:
     st.session_state.model_metrics = None
-if "model_encoders" not in st.session_state:
-    st.session_state.model_encoders = None
 if "last_train_time" not in st.session_state:
     st.session_state.last_train_time = None
-
-# Simple mock billing gate (replace with real auth in production)
 if "user_role" not in st.session_state:
-    st.session_state.user_role = "free"  # or "paid"
+    st.session_state.user_role = "free"  # demo role
 
 # ---------------------------
 # Page: Leads / Capture
@@ -542,19 +622,17 @@ elif page == "Pipeline Board":
 
         active_leads = total_leads - (awarded_count + lost_count)
 
-        # compute ML probabilities if model loaded
+        # If model loaded in session, compute probabilities and attach to df
         model = st.session_state.lead_model
-        encoders = st.session_state.model_encoders
-        model_feats = st.session_state.model_features
-        if model is not None and SKLEARN_AVAILABLE and model_feats is not None:
-            X_all, _ = build_feature_df_for_training(df)
+        if model is not None and SKLEARN_AVAILABLE:
+            X_all, _ = build_feature_df(df)
             try:
                 proba = model.predict_proba(X_all)[:, 1]
                 df["win_prob"] = proba
             except Exception:
                 df["win_prob"] = None
         else:
-            df["win_prob"] = None
+            df["win_prob"] = df.get("predicted_prob", None)
 
         KPI_ITEMS = [
             ("#2563eb", "Active Leads", f"{active_leads}", "Leads currently in pipeline"),
@@ -613,7 +691,7 @@ elif page == "Pipeline Board":
         priority_list = []
         for _, row in df.iterrows():
             try:
-                ml_prob = float(row["win_prob"]) if row.get("win_prob") is not None else None
+                ml_prob = float(row.get("win_prob")) if row.get("win_prob") is not None else None
             except Exception:
                 ml_prob = None
             try:
@@ -697,6 +775,12 @@ elif page == "Pipeline Board":
                     st.write(f"**Address:** {lead.property_address or '—'}")
                     st.write(f"**Notes:** {lead.notes or '—'}")
                     st.write(f"**Created:** {lead.created_at.strftime('%Y-%m-%d %H:%M') if lead.created_at else '—'}")
+                    # show predicted prob if exists
+                    try:
+                        if hasattr(lead, "predicted_prob") and lead.predicted_prob is not None:
+                            st.write(f"**Predicted Win Prob:** {lead.predicted_prob*100:.1f}%")
+                    except Exception:
+                        pass
                 with colB:
                     entered = lead.sla_entered_at or lead.created_at
                     if isinstance(entered, str):
@@ -717,6 +801,7 @@ elif page == "Pipeline Board":
                     st.markdown(f"<div style='text-align:right;'><div style='display:inline-block; padding:6px 12px; border-radius:20px; background:{stage_colors.get(lead.status,'#000')}22; color:{stage_colors.get(lead.status,'#000')}; font-weight:700;'>{lead.status}</div><div style='margin-top:12px;'>{sla_status_html}</div></div>", unsafe_allow_html=True)
 
                 st.markdown("---")
+                # Quick contact buttons
                 qc1, qc2, qc3, qc4 = st.columns([1,1,1,4])
                 phone = (lead.contact_phone or "").strip()
                 email = (lead.contact_email or "").strip()
@@ -767,7 +852,8 @@ elif page == "Pipeline Board":
 
                     if st.form_submit_button("💾 Update Lead"):
                         try:
-                            db_lead = s.query(Lead).filter(Lead.id == lead.id).first()
+                            db = get_session()
+                            db_lead = db.query(Lead).filter(Lead.id == lead.id).first()
                             if db_lead:
                                 db_lead.status = new_status
                                 db_lead.assigned_to = new_assigned
@@ -784,13 +870,26 @@ elif page == "Pipeline Board":
                                     db_lead.awarded_comment = award_comment
                                     if awarded_invoice_file is not None:
                                         path = save_uploaded_file(awarded_invoice_file, prefix=f"lead_{db_lead.id}_inv")
-                                        db_lead.awarded_invoice = path
+                                        db_lead.awarded_invoice = path  # store invoice path in 'awarded_invoice'
                                 if new_status == LeadStatus.LOST:
                                     db_lead.lost_date = datetime.utcnow()
                                     db_lead.lost_comment = lost_comment
-                                s.add(db_lead)
-                                s.commit()
+                                db.add(db_lead)
+                                db.commit()
                                 st.success(f"Lead #{db_lead.id} updated.")
+                                # Optionally recompute prediction for this lead if model exists
+                                if st.session_state.lead_model is not None and SKLEARN_AVAILABLE:
+                                    try:
+                                        # rebuild X row for this lead
+                                        df_single = leads_df(get_session())
+                                        row = df_single[df_single["id"] == db_lead.id]
+                                        X_row, _ = build_feature_df(row)
+                                        if not X_row.empty:
+                                            prob = predict_lead_probability_safe(st.session_state.lead_model, X_row)
+                                            if prob is not None:
+                                                persist_prediction_to_db(db_lead.id, prob)
+                                    except Exception:
+                                        pass
                             else:
                                 st.error("Lead not found.")
                         except Exception as e:
@@ -899,7 +998,7 @@ elif page == "Analytics & SLA":
         else:
             st.info("No awarded jobs in selected date range to compute CPA/velocity.")
 
-        # SLA Overdue trend (last 30 days) and table
+        # SLA Overdue Trend (last 30 days) and table
         st.markdown("---")
         st.subheader("SLA / Overdue Leads")
         st.markdown("<em>Trend of SLA overdue counts (last 30 days) and current overdue leads table.</em>", unsafe_allow_html=True)
@@ -963,60 +1062,58 @@ elif page == "Analytics & SLA":
 # Page: ML Model (Train / Evaluate / Save / Auto-Retrain)
 # ---------------------------
 elif page == "ML Model":
-    st.header("🧠 ML Model — Train, Evaluate & Save (Auto-Retrain controls)")
-    st.markdown("<em>Train a RandomForest baseline to predict whether a lead becomes a won job (status == 'Awarded').</em>", unsafe_allow_html=True)
+    st.header("🧠 ML Model — Train, Evaluate & Save")
+    st.markdown("<em>Build and evaluate a model to predict a lead's probability of converting to a won job.</em>", unsafe_allow_html=True)
 
     if not SKLEARN_AVAILABLE:
-        st.error("Scikit-learn not available in this environment. Install scikit-learn to use model training and evaluation.")
+        st.error("Scikit-learn not available. Install scikit-learn to enable training and evaluation.")
     else:
         s = get_session()
         df = leads_df(s)
         if df.empty:
-            st.info("No leads to train on. Collect some labeled data (wins/losses) first.")
+            st.info("No leads to train on. Collect labeled data (won jobs) first.")
         else:
-            X, y = build_feature_df_for_training(df)
-            st.markdown(f"Dataset size: **{len(X)}** leads — positive (awarded) count: **{int(y.sum())}**")
+            X, y = build_feature_df(df)
+            st.markdown(f"Dataset size: **{len(X)}** leads — awarded (positive) count: **{int(y.sum())}**")
             test_size = st.slider("Test set size (%)", 5, 50, 20)
             random_state = st.number_input("Random seed", min_value=0, value=42, step=1)
             n_estimators = st.number_input("RandomForest n_estimators", min_value=10, value=120, step=10)
             max_depth = st.number_input("RandomForest max_depth", min_value=2, value=6, step=1)
 
-            # Train button
             if st.button("Train model (RandomForest)"):
                 try:
-                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size / 100.0, random_state=int(random_state), stratify=y if y.nunique() > 1 else None)
-                    model_pipe = create_model_pipeline(n_estimators=int(n_estimators), max_depth=int(max_depth))
-                    model_pipe.fit(X_train, y_train)
+                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size / 100.0, random_state=int(random_state), stratify=y if y.nunique()>1 else None)
+                    model = create_sklearn_pipeline()
+                    model.set_params(clf__n_estimators=int(n_estimators), clf__max_depth=int(max_depth))
+                    model.fit(X_train, y_train)
                     # Evaluate
-                    y_pred = model_pipe.predict(X_test)
-                    y_prob = model_pipe.predict_proba(X_test)[:, 1] if hasattr(model_pipe, "predict_proba") else None
+                    y_pred = model.predict(X_test)
+                    y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else None
                     acc = accuracy_score(y_test, y_pred)
                     prec = precision_score(y_test, y_pred, zero_division=0)
                     rec = recall_score(y_test, y_pred, zero_division=0)
                     f1 = f1_score(y_test, y_pred, zero_division=0)
-                    roc = roc_auc_score(y_test, y_prob) if y_prob is not None and len(set(y_test)) > 1 else None
+                    roc = roc_auc_score(y_test, y_proba) if y_proba is not None and len(set(y_test))>1 else None
                     cm = confusion_matrix(y_test, y_pred)
                     metrics = {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1, "roc_auc": roc, "confusion_matrix": cm}
 
-                    # Save model bundle + encoders (we can save entire pipeline; encoders not necessary separately since pipeline includes OneHot)
-                    saved, p = save_model_bundle(model_pipe, X_sample=X_train, encoders=None, metrics=metrics, path=MODEL_PATH)
-                    st.session_state.lead_model = model_pipe
+                    saved, p = save_model(model)
+                    st.session_state.lead_model = model
                     st.session_state.model_features = list(X_train.columns)
                     st.session_state.model_metrics = metrics
                     st.session_state.last_train_time = time.time()
-                    st.success(f"Model trained and saved to {p}")
+                    if saved:
+                        st.success(f"Model trained and saved to {p}")
+                    else:
+                        st.warning(f"Model trained but not saved: {p}")
                     st.write(metrics)
-
-                    # Show ROC curve if possible
-                    if y_prob is not None and px:
-                        fpr, tpr, _ = roc_curve(y_test, y_prob)
+                    if y_proba is not None and px:
+                        fpr, tpr, _ = roc_curve(y_test, y_proba)
                         roc_df = pd.DataFrame({"fpr": fpr, "tpr": tpr})
                         fig = px.line(roc_df, x="fpr", y="tpr", title="ROC Curve (test set)")
                         fig.add_shape(type='line', x0=0, x1=1, y0=0, y1=1, line_dash='dash')
                         st.plotly_chart(fig, use_container_width=True)
-
-                    # Show confusion matrix
-                    st.markdown("Confusion matrix (test set)")
+                    st.markdown("Confusion matrix")
                     st.dataframe(pd.DataFrame(cm, index=["Actual 0","Actual 1"], columns=["Pred 0","Pred 1"]))
                 except Exception as e:
                     st.error(f"Model training failed: {e}")
@@ -1024,26 +1121,26 @@ elif page == "ML Model":
 
             st.markdown("---")
             st.markdown("### Auto-Retrain Controls")
-            st.markdown("You can retrain manually, or enable a safety check that retrains if last training is older than X days (runs only when you visit this page).")
             retrain_if_older_days = st.number_input("Retrain if older than (days)", min_value=1, value=7, step=1)
-            do_retrain_check = st.checkbox("Run retrain-if-old check now (safe; runs on page load only)", value=False)
-            if do_retrain_check:
+            do_check = st.checkbox("Run retrain-if-old check now (runs on page load only)", value=False)
+            if do_check:
                 last = st.session_state.get("last_train_time")
                 now = time.time()
                 if last is None or (now - last) > (retrain_if_older_days * 24 * 3600):
                     st.info("Training required — starting retrain now.")
                     try:
-                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size / 100.0, random_state=int(random_state), stratify=y if y.nunique() > 1 else None)
-                        model_pipe = create_model_pipeline(n_estimators=int(n_estimators), max_depth=int(max_depth))
-                        model_pipe.fit(X_train, y_train)
-                        y_pred = model_pipe.predict(X_test)
-                        y_prob = model_pipe.predict_proba(X_test)[:, 1] if hasattr(model_pipe, "predict_proba") else None
+                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size / 100.0, random_state=int(random_state), stratify=y if y.nunique()>1 else None)
+                        model = create_sklearn_pipeline()
+                        model.set_params(clf__n_estimators=int(n_estimators), clf__max_depth=int(max_depth))
+                        model.fit(X_train, y_train)
+                        y_pred = model.predict(X_test)
+                        y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else None
                         acc = accuracy_score(y_test, y_pred)
-                        roc = roc_auc_score(y_test, y_prob) if y_prob is not None and len(set(y_test)) > 1 else None
+                        roc = roc_auc_score(y_test, y_proba) if y_proba is not None and len(set(y_test))>1 else None
                         cm = confusion_matrix(y_test, y_pred)
                         metrics = {"accuracy": acc, "roc_auc": roc, "confusion_matrix": cm}
-                        saved, p = save_model_bundle(model_pipe, X_sample=X_train, encoders=None, metrics=metrics, path=MODEL_PATH)
-                        st.session_state.lead_model = model_pipe
+                        saved, p = save_model(model)
+                        st.session_state.lead_model = model
                         st.session_state.model_features = list(X_train.columns)
                         st.session_state.model_metrics = metrics
                         st.session_state.last_train_time = time.time()
@@ -1059,43 +1156,39 @@ elif page == "ML Model":
 # ---------------------------
 elif page == "Evaluation Dashboard":
     st.header("📊 Evaluation Dashboard")
-    st.markdown("<em>Model performance metrics, confusion matrix, ROC (if available) and calibration insights.</em>", unsafe_allow_html=True)
-    model = st.session_state.lead_model
-    metrics = st.session_state.model_metrics
+    st.markdown("<em>Model performance metrics, confusion matrix, and ROC if available.</em>", unsafe_allow_html=True)
+    model = st.session_state.get("lead_model")
+    metrics = st.session_state.get("model_metrics")
     if model is None:
         st.info("No model loaded. Train one in 'ML Model' or load from sidebar.")
     else:
-        st.markdown("### Model metrics")
-        st.write(metrics or "No stored metrics.")
-        st.markdown("---")
-        # If metrics contain confusion matrix, show nicely
+        st.markdown("### Stored model metrics")
+        st.write(metrics or "No metrics stored.")
         if metrics and "confusion_matrix" in metrics and metrics["confusion_matrix"] is not None:
             cm = metrics["confusion_matrix"]
             st.markdown("#### Confusion Matrix")
             st.dataframe(pd.DataFrame(cm, index=["Actual 0","Actual 1"], columns=["Pred 0","Pred 1"]))
-        # ROC if available in stored metrics (we stored roc_auc)
         if metrics and metrics.get("roc_auc") is not None:
             st.markdown(f"**ROC AUC:** {metrics['roc_auc']:.3f}")
-        # Allow quick local evaluation using current DB
-        if st.button("Run evaluation on current DB (quick)"):
+        if st.button("Run quick evaluation on current DB"):
             try:
                 s = get_session()
                 df = leads_df(s)
-                X, y = build_feature_df_for_training(df)
+                X, y = build_feature_df(df)
                 if X.empty:
                     st.info("No data to evaluate.")
                 else:
-                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y if y.nunique() > 1 else None)
+                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y if y.nunique()>1 else None)
                     y_pred = model.predict(X_test)
-                    y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else None
+                    y_proba = model.predict_proba(X_test)[:,1] if hasattr(model,"predict_proba") else None
                     st.write("Accuracy:", accuracy_score(y_test, y_pred))
                     st.write("Precision:", precision_score(y_test, y_pred, zero_division=0))
                     st.write("Recall:", recall_score(y_test, y_pred, zero_division=0))
                     st.write("F1:", f1_score(y_test, y_pred, zero_division=0))
                     if y_proba is not None and px:
-                        fpr, tpr, _ = roc_curve(y_test, y_proba)
-                        roc_df = pd.DataFrame({"fpr": fpr, "tpr": tpr})
-                        fig = px.line(roc_df, x="fpr", y="tpr", title="ROC Curve (current DB eval)")
+                        fpr,tpr,_ = roc_curve(y_test, y_proba)
+                        roc_df = pd.DataFrame({"fpr":fpr,"tpr":tpr})
+                        fig = px.line(roc_df, x="fpr", y="tpr", title="ROC Curve (current DB)")
                         fig.add_shape(type='line', x0=0, x1=1, y0=0, y1=1, line_dash='dash')
                         st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
@@ -1107,13 +1200,12 @@ elif page == "Evaluation Dashboard":
 # ---------------------------
 elif page == "AI Recommendations":
     st.header("💡 AI Recommendations")
-    st.markdown("<em>Source & operational recommendations based on historical win rates and ML signals.</em>", unsafe_allow_html=True)
+    st.markdown("<em>Source-level recommendations and improvement notes.</em>", unsafe_allow_html=True)
     s = get_session()
     df = leads_df(s)
     if df.empty:
         st.info("No leads yet.")
     else:
-        # Source performance
         src_perf = df.groupby("source").apply(lambda d: (d["status"] == LeadStatus.AWARDED).mean()).reset_index()
         src_perf.columns = ["source", "win_rate"]
         st.markdown("### Source performance (win rate)")
@@ -1121,15 +1213,15 @@ elif page == "AI Recommendations":
         st.markdown("### Suggestions")
         best_sources = src_perf.sort_values("win_rate", ascending=False).head(3)
         worst_sources = src_perf.sort_values("win_rate", ascending=True).head(3)
-        st.markdown("Top performing sources — consider increasing spend or focus on these:")
+        st.markdown("Top performing sources — consider increasing spend or focusing on these:")
         for _, r in best_sources.iterrows():
             st.write(f"- {r['source']}: win rate {r['win_rate']*100:.1f}%")
-        st.markdown("Low performing sources — review quality or adjust targeting:")
+        st.markdown("Low performing sources — review targeting or lead quality:")
         for _, r in worst_sources.iterrows():
             st.write(f"- {r['source']}: win rate {r['win_rate']*100:.1f}%")
 
 # ---------------------------
-# Page: Pipeline Report (docx export)
+# Page: Pipeline Report (DOCX)
 # ---------------------------
 elif page == "Pipeline Report":
     st.header("📄 Pipeline Report (Export .docx)")
@@ -1140,13 +1232,13 @@ elif page == "Pipeline Report":
         st.info("No leads to report.")
     else:
         if not DOCX_AVAILABLE:
-            st.warning("python-docx not installed — install it to enable .docx export (pip install python-docx).")
+            st.warning("python-docx not installed — install it (pip install python-docx) to enable DOCX export.")
         else:
             if st.button("Generate pipeline_report.docx"):
                 try:
                     doc = Document()
                     doc.add_heading('TOTAL LEAD PIPELINE KEY PERFORMANCE INDICATOR', 0)
-                    # KPI summary
+                    doc.add_paragraph('*Total health view of live leads, response performance, and projected job value.*')
                     total_leads = len(df)
                     awarded_count = int(df[df["status"] == LeadStatus.AWARDED].shape[0])
                     pipeline_value = float(df["estimated_value"].sum()) if not df.empty else 0.0
@@ -1154,22 +1246,23 @@ elif page == "Pipeline Report":
                     doc.add_paragraph(f"Awarded (won): {awarded_count}")
                     doc.add_paragraph(f"Pipeline job value: ${pipeline_value:,.0f}")
                     # ML metrics
-                    metrics = st.session_state.model_metrics
+                    metrics = st.session_state.get("model_metrics")
                     if metrics:
                         doc.add_heading("ML Metrics", level=1)
                         doc.add_paragraph(f"Accuracy: {metrics.get('accuracy')}")
                         doc.add_paragraph(f"ROC AUC: {metrics.get('roc_auc')}")
                     # Top 5 priority leads
                     # compute priority with available model prob
+                    df_local = df.copy()
                     if st.session_state.lead_model is not None and SKLEARN_AVAILABLE:
-                        X_all, _ = build_feature_df_for_training(df)
                         try:
+                            X_all, _ = build_feature_df(df_local)
                             proba = st.session_state.lead_model.predict_proba(X_all)[:, 1]
-                            df["win_prob"] = proba
+                            df_local["win_prob"] = proba
                         except Exception:
-                            df["win_prob"] = None
+                            df_local["win_prob"] = None
                     priority_list = []
-                    for _, row in df.iterrows():
+                    for _, row in df_local.iterrows():
                         ml_prob = float(row.get("win_prob")) if row.get("win_prob") is not None else None
                         score = compute_priority_for_lead_row(row, st.session_state.weights, ml_prob=ml_prob)
                         priority_list.append((int(row["id"]), row.get("contact_name") or "No name", score))
@@ -1177,10 +1270,10 @@ elif page == "Pipeline Report":
                     doc.add_heading("Top 5 Priority Leads", level=1)
                     for pid, name, score in top5:
                         doc.add_paragraph(f"#{pid} — {name} — Score: {score:.2f}")
-                    path = os.path.join(MODEL_DIR, "pipeline_report.docx")
+                    path = os.path.join(MODEL_DIR, f"pipeline_report_{int(time.time())}.docx")
                     doc.save(path)
                     with open(path, "rb") as fh:
-                        st.download_button("Download pipeline_report.docx", fh, file_name="pipeline_report.docx")
+                        st.download_button("Download pipeline_report.docx", fh, file_name=os.path.basename(path))
                     st.success("Report generated.")
                 except Exception as e:
                     st.error(f"Failed to generate report: {e}")
@@ -1203,5 +1296,5 @@ elif page == "Exports":
         st.download_button("Download estimates.csv", df_est.to_csv(index=False).encode("utf-8"), file_name="estimates.csv", mime="text/csv")
 
 # ---------------------------
-# End of app
+# End
 # ---------------------------
