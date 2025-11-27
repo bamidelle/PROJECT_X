@@ -7,3 +7,4 @@ pytz
 joblib
 scikit-learn
 plotly
+matplotlib
