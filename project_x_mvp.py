@@ -740,25 +740,25 @@ elif page == "Pipeline Board":
                     conv_pct = r["conversion_prob"] * 100
                     conv_color = "#22c55e" if conv_pct > 70 else ("#f97316" if conv_pct > 40 else "#ef4444")
                     conv_html = f"<span style='color:{conv_color};font-weight:600;margin-left:12px;'>📊 {conv_pct:.0f}% Win Prob</span>"
-             st.markdown(f"""
-            <div style="background: #000000; padding:12px; border-radius:12px; margin-bottom:10px;">
-              <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div style="flex:1;">
-                  <div style="margin-bottom:6px;">
-                    <span style="color:{priority_color}; font-weight:800;">{priority_label}</span>
-                    <span style="display:inline-block; padding:6px 12px; border-radius:18px; font-size:12px; font-weight:600; margin-left:8px; background:{status_color}22; color:{status_color};">{status}</span>
+                 st.markdown(f"""
+                <div style="background: #000000; padding:12px; border-radius:12px; margin-bottom:10px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="flex:1;">
+                      <div style="margin-bottom:6px;">
+                        <span style="color:{priority_color}; font-weight:800;">{priority_label}</span>
+                        <span style="display:inline-block; padding:6px 12px; border-radius:18px; font-size:12px; font-weight:600; margin-left:8px; background:{status_color}22; color:{status_color};">{status}</span>
+                      </div>
+                      <div style="font-size:20px; font-weight:900; color:#FFFFFF;">#{int(r['id'])} — {r['contact_name']}</div>
+                      <div style="font-size:13px; color:var(--muted); margin-top:6px;">{r['damage_type'].title()} | Est: <span style='color:var(--money-green); font-weight:800;'>${r['estimated_value']:,.0f}</span></div>
+                      <div style="font-size:13px; margin-top:8px; color:var(--muted);">{sla_html} {conv_html}</div>
+                    </div>
+                    <div style="text-align:right; padding-left:18px;">
+                      <div style="font-size:28px; font-weight:900; color:{priority_color};">{r['priority_score']:.2f}</div>
+                      <div style="font-size:11px; color:var(--muted); text-transform:uppercase;">Priority</div>
+                    </div>
                   </div>
-                  <div style="font-size:20px; font-weight:900; color:#FFFFFF;">#{int(r['id'])} — {r['contact_name']}</div>
-                  <div style="font-size:13px; color:var(--muted); margin-top:6px;">{r['damage_type'].title()} | Est: <span style='color:var(--money-green); font-weight:800;'>${r['estimated_value']:,.0f}</span></div>
-                  <div style="font-size:13px; margin-top:8px; color:var(--muted);">{sla_html} {conv_html}</div>
                 </div>
-                <div style="text-align:right; padding-left:18px;">
-                  <div style="font-size:28px; font-weight:900; color:{priority_color};">{r['priority_score']:.2f}</div>
-                  <div style="font-size:11px; color:var(--muted); text-transform:uppercase;">Priority</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
 
         st.markdown("---")
