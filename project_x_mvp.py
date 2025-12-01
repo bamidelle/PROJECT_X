@@ -741,7 +741,7 @@ elif page == "Pipeline Board":
                     conv_color = "#22c55e" if conv_pct > 70 else ("#f97316" if conv_pct > 40 else "#ef4444")
                     conv_html = f"<span style='color:{conv_color};font-weight:600;margin-left:12px;'>📊 {conv_pct:.0f}% Win Prob</span>"
                 st.markdown(f"""
-                <div style="background: linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.02)); padding:12px; border-radius:12px; margin-bottom:10px;">
+                <div style="background: black(#000000); padding:12px; border-radius:12px; margin-bottom:10px;">
                   <div style="display:flex; justify-content:space-between; align-items:center;">
                     <div style="flex:1;">
                       <div style="margin-bottom:6px;">
